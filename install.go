@@ -12,7 +12,7 @@ const taskName = "ccx-proxy"
 
 // cmdInstall registers the proxy to start at logon via a Scheduled Task, then
 // starts it. The task runs `ccx serve --hidden` so no console window appears.
-func cmdInstall(p paths) error {
+func cmdInstall() error {
 	if runtime.GOOS != "windows" {
 		return fmt.Errorf("ccx install currently supports Windows only")
 	}
@@ -29,7 +29,6 @@ func cmdInstall(p paths) error {
 		return fmt.Errorf("task registered but failed to start now: %w", err)
 	}
 	fmt.Printf("installed %q, starts at logon and is running now\n", taskName)
-	fmt.Printf("logs: %s\n", p.claudeDir+`\switcher\proxy.log`)
 	return nil
 }
 
