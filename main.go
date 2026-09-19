@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const usage = `ccx: switch Claude accounts inside a live session, via a local proxy.
@@ -207,6 +209,8 @@ func cmdUsage() error {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+
+	now := time.Now()
 	for _, name := range names {
 		a := accounts[name]
 		fmt.Printf("%s  %s\n", name, a.Email)
@@ -220,11 +224,77 @@ func cmdUsage() error {
 		}
 		sort.Strings(hkeys)
 		for _, k := range hkeys {
-			fmt.Printf("    %-48s %s\n", strings.TrimPrefix(k, "anthropic-ratelimit-"), a.Headers[k])
+			label := strings.TrimPrefix(k, "anthropic-ratelimit-")
+			value := a.Headers[k]
+			if strings.HasSuffix(k, "reset") {
+				if t, ok := parseReset(value, now); ok {
+					value = humanReset(t, now)
+				}
+			}
+			fmt.Printf("    %-24s %s\n", label, value)
 		}
-		fmt.Printf("    (as of %s)\n", a.ObservedAt)
+		if t, err := parseObserved(a.ObservedAt); err == nil {
+			fmt.Printf("    seen %s ago\n", shortAgo(now.Sub(t)))
+		}
 	}
 	return nil
+}
+
+// parseReset reads a rate-limit reset value as an RFC3339 timestamp, epoch
+// seconds or millis, or a plain seconds-from-now count, so both header shapes
+// Anthropic uses land on the same instant.
+func parseReset(v string, now time.Time) (time.Time, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t, true
+	}
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		switch {
+		case n > 1_000_000_000_000:
+			return time.UnixMilli(n), true
+		case n > 1_000_000_000:
+			return time.Unix(n, 0), true
+		default:
+			return now.Add(time.Duration(n) * time.Second), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func humanReset(t, now time.Time) string {
+	local := t.Local().Format("Mon 15:04 MST")
+	d := t.Sub(now)
+	if d <= 0 {
+		return local + " (now)"
+	}
+	return local + " (in " + shortDur(d) + ")"
+}
+
+func parseObserved(v string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339, v)
+}
+
+func shortDur(d time.Duration) string {
+	d = d.Round(time.Minute)
+	h := d / time.Hour
+	mnt := (d % time.Hour) / time.Minute
+	if h > 0 {
+		return fmt.Sprintf("%dh%02dm", h, mnt)
+	}
+	return fmt.Sprintf("%dm", mnt)
+}
+
+func shortAgo(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	return shortDur(d)
 }
 
 func cmdPing(args []string) error {
