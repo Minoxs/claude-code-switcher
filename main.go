@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"sort"
+	"strings"
 )
 
 const usage = `ccx: switch Claude accounts inside a live session, via a local proxy.
@@ -15,7 +18,10 @@ const usage = `ccx: switch Claude accounts inside a live session, via a local pr
   ccx use <name>           make <name> active; a running proxy switches instantly
   ccx rm <name>            delete a saved profile
   ccx serve [--port N]     run the proxy Claude Code talks to
+  ccx usage                per-account rate-limit usage the proxy has observed
   ccx env                  print the env vars that point Claude Code at the proxy
+  ccx install              start the proxy at logon (Windows scheduled task)
+  ccx uninstall            remove the logon task
 
 Load accounts by logging into each one in Claude Code, then ccx add <name>.
 Run ccx serve, point Claude Code at it with ccx env, and ccx use flips the
@@ -52,6 +58,8 @@ func run(args []string) error {
 		return cmdServe(p, args[1:])
 	case "env":
 		return cmdEnv()
+	case "usage":
+		return cmdUsage()
 	case "help", "-h", "--help":
 		fmt.Println(usage)
 		return nil
@@ -160,6 +168,55 @@ func controlSwitch(name string) (string, bool) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	return string(body), resp.StatusCode == http.StatusOK
+}
+
+func cmdUsage() error {
+	port := defaultPort
+	if v := os.Getenv("CCX_PORT"); v != "" {
+		port = v
+	}
+	resp, err := http.Get("http://127.0.0.1:" + port + "/ccx/usage")
+	if err != nil {
+		return fmt.Errorf("no proxy on port %s; start it with ccx serve", port)
+	}
+	defer resp.Body.Close()
+
+	var accounts map[string]struct {
+		Email      string            `json:"email"`
+		ObservedAt string            `json:"observedAt"`
+		Headers    map[string]string `json:"headers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&accounts); err != nil {
+		return err
+	}
+	if len(accounts) == 0 {
+		fmt.Println("no saved accounts. run: ccx add <name>")
+		return nil
+	}
+
+	names := make([]string, 0, len(accounts))
+	for name := range accounts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		a := accounts[name]
+		fmt.Printf("%s  %s\n", name, a.Email)
+		if len(a.Headers) == 0 {
+			fmt.Println("    no requests seen yet")
+			continue
+		}
+		hkeys := make([]string, 0, len(a.Headers))
+		for k := range a.Headers {
+			hkeys = append(hkeys, k)
+		}
+		sort.Strings(hkeys)
+		for _, k := range hkeys {
+			fmt.Printf("    %-48s %s\n", strings.TrimPrefix(k, "anthropic-ratelimit-"), a.Headers[k])
+		}
+		fmt.Printf("    (as of %s)\n", a.ObservedAt)
+	}
+	return nil
 }
 
 func cmdEnv() error {
