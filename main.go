@@ -21,7 +21,7 @@ const usage = `ccx: switch Claude accounts inside a live session, via a local pr
   ccx serve [--port N]     run the proxy Claude Code talks to
   ccx usage                per-account rate-limit usage the proxy has observed
   ccx env [bash]           print the env vars that point Claude Code at the proxy
-  ccx ping                 exit 0 if the proxy is up, non-zero otherwise
+  ccx ping [-v]            exit 0 if the proxy is up, non-zero otherwise
   ccx install              start the proxy at logon (Windows scheduled task)
   ccx uninstall            remove the logon task
 
@@ -63,7 +63,7 @@ func run(args []string) error {
 	case "usage":
 		return cmdUsage()
 	case "ping":
-		return cmdPing()
+		return cmdPing(args[1:])
 	case "install":
 		return cmdInstall()
 	case "uninstall":
@@ -224,18 +224,34 @@ func cmdUsage() error {
 	return nil
 }
 
-func cmdPing() error {
+func cmdPing(args []string) error {
+	verbose := false
+	for _, a := range args {
+		if a == "-v" {
+			verbose = true
+		}
+	}
 	port := defaultPort
 	if v := os.Getenv("CCX_PORT"); v != "" {
 		port = v
 	}
+
+	fail := func(err error) {
+		if verbose {
+			fmt.Fprintln(os.Stderr, "ccx: "+err.Error())
+		}
+		os.Exit(1)
+	}
 	resp, err := http.Get("http://127.0.0.1:" + port + "/ccx/status")
 	if err != nil {
-		return fmt.Errorf("no proxy on port %s", port)
+		fail(fmt.Errorf("no proxy on port %s", port))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("proxy on port %s returned %d", port, resp.StatusCode)
+		fail(fmt.Errorf("proxy on port %s returned %d", port, resp.StatusCode))
+	}
+	if verbose {
+		fmt.Printf("proxy up on port %s\n", port)
 	}
 	return nil
 }
