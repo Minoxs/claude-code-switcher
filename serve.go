@@ -134,6 +134,12 @@ func (m *manager) candidates() []string {
 	return []string{soonest}
 }
 
+func (m *manager) activeName() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.active
+}
+
 func (m *manager) markLimited(name string, until time.Time) {
 	m.mu.Lock()
 	m.limitedUntil[name] = until
@@ -397,7 +403,9 @@ func (m *manager) forward(upstream *url.URL, beta string, w http.ResponseWriter,
 		}
 
 		m.clearLimited(name)
-		_ = m.switchTo(name)
+		if name != m.activeName() {
+			_ = m.switchTo(name)
+		}
 		streamResponse(w, resp)
 		resp.Body.Close()
 		return
