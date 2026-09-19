@@ -1,14 +1,15 @@
 package main
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,13 +21,6 @@ const defaultUpstream = "https://api.anthropic.com"
 // The OAuth capability Claude Code requests carry. Gateway mode drops it, so
 // the proxy re-adds it before forwarding to the subscription backend.
 const defaultOAuthBeta = "oauth-2025-04-20"
-
-type ctxKey int
-
-const (
-	tokenKey   ctxKey = 0
-	accountKey ctxKey = 1
-)
 
 // usageSnapshot holds the rate-limit headers observed on an account's last
 // response, verbatim, so ccx never has to guess Anthropic's claim names.
@@ -42,10 +36,11 @@ type manager struct {
 	p        paths
 	clientID string
 
-	mu     sync.Mutex
-	active string
-	prof   *Profile
-	usage  map[string]usageSnapshot
+	mu           sync.Mutex
+	active       string
+	prof         *Profile
+	usage        map[string]usageSnapshot
+	limitedUntil map[string]time.Time
 
 	refreshMu sync.Mutex
 }
@@ -72,7 +67,13 @@ func newManager(p paths) *manager {
 	if v := os.Getenv("CCX_OAUTH_CLIENT_ID"); v != "" {
 		clientID = v
 	}
-	return &manager{p: p, clientID: clientID, active: p.readActive(), usage: map[string]usageSnapshot{}}
+	return &manager{
+		p:            p,
+		clientID:     clientID,
+		active:       p.readActive(),
+		usage:        map[string]usageSnapshot{},
+		limitedUntil: map[string]time.Time{},
+	}
 }
 
 // switchTo makes name the account every subsequent request uses.
@@ -88,18 +89,114 @@ func (m *manager) switchTo(name string) error {
 	return m.p.writeActive(name)
 }
 
-// token returns a valid access token for the active account and its name,
-// refreshing and persisting the rotated credentials when the current one is
-// near expiry.
-func (m *manager) token() (string, string, error) {
+// candidates lists the accounts to try for a request: the active one first,
+// then the rest by name, dropping any still inside a rate-limit cooldown. When
+// every account is cooling down it returns the single one that resets soonest,
+// so a fully-limited fleet stops rotating and parks there.
+func (m *manager) candidates() []string {
 	m.mu.Lock()
-	name, creds, err := m.currentCredsLocked()
+	active := m.active
 	m.mu.Unlock()
+	if active == "" {
+		return nil
+	}
+	profs, err := m.p.listProfiles()
 	if err != nil {
-		return "", "", err
+		return []string{active}
+	}
+
+	ordered := []string{active}
+	for _, prof := range profs {
+		if prof.Name != active {
+			ordered = append(ordered, prof.Name)
+		}
+	}
+
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	eligible := make([]string, 0, len(ordered))
+	soonest := ""
+	var soonestAt time.Time
+	for _, name := range ordered {
+		until, ok := m.limitedUntil[name]
+		if !ok || !until.After(now) {
+			eligible = append(eligible, name)
+			continue
+		}
+		if soonest == "" || until.Before(soonestAt) {
+			soonest, soonestAt = name, until
+		}
+	}
+	if len(eligible) > 0 {
+		return eligible
+	}
+	return []string{soonest}
+}
+
+func (m *manager) markLimited(name string, until time.Time) {
+	m.mu.Lock()
+	m.limitedUntil[name] = until
+	m.mu.Unlock()
+}
+
+func (m *manager) clearLimited(name string) {
+	m.mu.Lock()
+	delete(m.limitedUntil, name)
+	m.mu.Unlock()
+}
+
+// soonestLimited returns whichever of names resets from its cooldown first, so
+// an all-limited fleet parks on the account that recovers next.
+func (m *manager) soonestLimited(names []string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	best := ""
+	var bestAt time.Time
+	for _, name := range names {
+		until, ok := m.limitedUntil[name]
+		if !ok {
+			continue
+		}
+		if best == "" || until.Before(bestAt) {
+			best, bestAt = name, until
+		}
+	}
+	if best == "" {
+		return m.active
+	}
+	return best
+}
+
+// loadCreds returns the named profile and its parsed credentials, using the
+// cached active profile when it matches.
+func (m *manager) loadCreds(name string) (Profile, oauthCreds, error) {
+	m.mu.Lock()
+	if m.prof != nil && m.active == name {
+		prof := *m.prof
+		m.mu.Unlock()
+		creds, err := parseCreds(prof.Identity.Credentials)
+		return prof, creds, err
+	}
+	m.mu.Unlock()
+
+	prof, err := m.p.loadProfile(name)
+	if err != nil {
+		return Profile{}, oauthCreds{}, err
+	}
+	creds, err := parseCreds(prof.Identity.Credentials)
+	return prof, creds, err
+}
+
+// tokenFor returns a valid access token for the named account, refreshing and
+// persisting the rotated credentials when the current one is near expiry.
+func (m *manager) tokenFor(name string) (string, error) {
+	_, creds, err := m.loadCreds(name)
+	if err != nil {
+		return "", err
 	}
 	if !creds.expired() {
-		return creds.AccessToken, name, nil
+		return creds.AccessToken, nil
 	}
 
 	// Serialize refreshes so a burst of expired requests rotates the token
@@ -107,45 +204,26 @@ func (m *manager) token() (string, string, error) {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 
-	m.mu.Lock()
-	name, creds, err = m.currentCredsLocked()
-	m.mu.Unlock()
+	_, creds, err = m.loadCreds(name)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	if !creds.expired() {
-		return creds.AccessToken, name, nil
+		return creds.AccessToken, nil
 	}
 
 	fresh, err := refresh(creds, m.clientID)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	raw, err := json.Marshal(fresh)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	if err := m.persistCreds(name, raw); err != nil {
-		return "", "", err
+		return "", err
 	}
-	return fresh.AccessToken, name, nil
-}
-
-// currentCredsLocked resolves the active account and its parsed credentials,
-// loading the profile from disk the first time. Caller holds m.mu.
-func (m *manager) currentCredsLocked() (string, oauthCreds, error) {
-	if m.prof == nil {
-		if m.active == "" {
-			return "", oauthCreds{}, fmt.Errorf("no active account; run: ccx use <name>")
-		}
-		prof, err := m.p.loadProfile(m.active)
-		if err != nil {
-			return "", oauthCreds{}, err
-		}
-		m.prof = &prof
-	}
-	creds, err := parseCreds(m.prof.Identity.Credentials)
-	return m.active, creds, err
+	return fresh.AccessToken, nil
 }
 
 // persistCreds writes rotated credentials for name to disk. It saves by name
@@ -243,39 +321,12 @@ func cmdServe(p paths, args []string) error {
 
 	mgr := newManager(p)
 
-	proxy := &httputil.ReverseProxy{
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(upstream)
-			pr.Out.Host = upstream.Host
-			pr.Out.Header.Del("X-Api-Key")
-			pr.Out.Header.Set("Authorization", "Bearer "+pr.In.Context().Value(tokenKey).(string))
-			pr.Out.Header.Set("anthropic-beta", mergeBeta(pr.Out.Header.Get("anthropic-beta"), beta))
-			if pr.Out.Header.Get("x-app") == "" {
-				pr.Out.Header.Set("x-app", "cli")
-			}
-		},
-		ModifyResponse: func(resp *http.Response) error {
-			if account, ok := resp.Request.Context().Value(accountKey).(string); ok {
-				mgr.recordUsage(account, resp.Header)
-			}
-			return nil
-		},
-		FlushInterval: -1, // stream SSE token-by-token instead of buffering
-	}
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ccx/", func(w http.ResponseWriter, r *http.Request) {
 		handleControl(mgr, w, r)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		token, account, err := mgr.token()
-		if err != nil {
-			http.Error(w, "ccx: "+err.Error(), http.StatusBadGateway)
-			return
-		}
-		ctx := context.WithValue(r.Context(), tokenKey, token)
-		ctx = context.WithValue(ctx, accountKey, account)
-		proxy.ServeHTTP(w, r.WithContext(ctx))
+		mgr.forward(upstream, beta, w, r)
 	})
 
 	addr := "127.0.0.1:" + port
@@ -289,6 +340,159 @@ func cmdServe(p paths, args []string) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return srv.ListenAndServe()
+}
+
+// forward proxies one request, rotating to the next saved account and replaying
+// when an account is rate-limited, so a 429 stays hidden from Claude Code while
+// another account still has budget. It makes at most one attempt per candidate,
+// and when every account is limited it parks on the soonest to reset and hands
+// the 429 back rather than looping.
+func (m *manager) forward(upstream *url.URL, beta string, w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	r.Body.Close()
+	if err != nil {
+		http.Error(w, "ccx: read request: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	names := m.candidates()
+	if len(names) == 0 {
+		http.Error(w, "ccx: no active account; run: ccx use <name>", http.StatusBadGateway)
+		return
+	}
+
+	for i, name := range names {
+		last := i == len(names)-1
+
+		token, err := m.tokenFor(name)
+		if err != nil {
+			if last {
+				http.Error(w, "ccx: "+err.Error(), http.StatusBadGateway)
+				return
+			}
+			continue
+		}
+
+		resp, err := http.DefaultTransport.RoundTrip(buildUpstream(r, body, upstream, token, beta))
+		if err != nil {
+			if last {
+				http.Error(w, "ccx: upstream: "+err.Error(), http.StatusBadGateway)
+				return
+			}
+			continue
+		}
+		m.recordUsage(name, resp.Header)
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			m.markLimited(name, resetAfter(resp))
+			if !last {
+				resp.Body.Close()
+				continue
+			}
+			// Every account is limited; park on the one that recovers first.
+			_ = m.switchTo(m.soonestLimited(names))
+			streamResponse(w, resp)
+			resp.Body.Close()
+			return
+		}
+
+		m.clearLimited(name)
+		_ = m.switchTo(name)
+		streamResponse(w, resp)
+		resp.Body.Close()
+		return
+	}
+}
+
+// buildUpstream rewrites an inbound request for the subscription backend: it
+// swaps in the account's bearer token, re-adds the OAuth beta, and replays the
+// buffered body so the request can be retried against another account.
+func buildUpstream(r *http.Request, body []byte, upstream *url.URL, token, beta string) *http.Request {
+	out := r.Clone(r.Context())
+	out.RequestURI = ""
+	out.URL.Scheme = upstream.Scheme
+	out.URL.Host = upstream.Host
+	out.Host = upstream.Host
+	out.Body = io.NopCloser(bytes.NewReader(body))
+	out.ContentLength = int64(len(body))
+
+	out.Header.Del("X-Api-Key")
+	out.Header.Set("Authorization", "Bearer "+token)
+	out.Header.Set("anthropic-beta", mergeBeta(out.Header.Get("anthropic-beta"), beta))
+	if out.Header.Get("x-app") == "" {
+		out.Header.Set("x-app", "cli")
+	}
+	for key := range out.Header {
+		if isHopHeader(key) {
+			out.Header.Del(key)
+		}
+	}
+	return out
+}
+
+// streamResponse copies an upstream response back to the client, flushing every
+// chunk so SSE tokens arrive as they are produced instead of being buffered.
+func streamResponse(w http.ResponseWriter, resp *http.Response) {
+	dst := w.Header()
+	for key, vals := range resp.Header {
+		if isHopHeader(key) {
+			continue
+		}
+		dst[key] = append([]string(nil), vals...)
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if rerr != nil {
+			return
+		}
+	}
+}
+
+func isHopHeader(key string) bool {
+	switch http.CanonicalHeaderKey(key) {
+	case "Connection", "Proxy-Connection", "Keep-Alive",
+		"Proxy-Authenticate", "Proxy-Authorization",
+		"Te", "Trailer", "Transfer-Encoding", "Upgrade":
+		return true
+	}
+	return false
+}
+
+// resetAfter reads when a rate-limited account will accept requests again,
+// preferring Retry-After and falling back to the unified reset headers. It
+// defaults to an hour when the response says nothing.
+func resetAfter(resp *http.Response) time.Time {
+	now := time.Now()
+	if ra := strings.TrimSpace(resp.Header.Get("Retry-After")); ra != "" {
+		if secs, err := strconv.Atoi(ra); err == nil {
+			return now.Add(time.Duration(secs) * time.Second)
+		}
+		if t, err := http.ParseTime(ra); err == nil {
+			return t
+		}
+	}
+	for _, key := range []string{
+		"anthropic-ratelimit-unified-reset",
+		"anthropic-ratelimit-unified-5h-reset",
+		"anthropic-ratelimit-unified-7d-reset",
+	} {
+		if t, ok := parseReset(resp.Header.Get(key), now); ok {
+			return t
+		}
+	}
+	return now.Add(time.Hour)
 }
 
 func handleControl(mgr *manager, w http.ResponseWriter, r *http.Request) {
