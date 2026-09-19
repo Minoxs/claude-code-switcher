@@ -226,11 +226,6 @@ func cmdServe(p paths, args []string) error {
 	}
 	if hidden {
 		hideConsole()
-		if f, err := os.OpenFile(filepath.Join(p.claudeDir, "switcher", "proxy.log"),
-			os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
-			os.Stdout = f
-			os.Stderr = f
-		}
 	}
 
 	upstreamStr := defaultUpstream

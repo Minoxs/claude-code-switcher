@@ -65,7 +65,7 @@ func run(args []string) error {
 	case "ping":
 		return cmdPing()
 	case "install":
-		return cmdInstall(p)
+		return cmdInstall()
 	case "uninstall":
 		return cmdUninstall()
 	case "help", "-h", "--help":
