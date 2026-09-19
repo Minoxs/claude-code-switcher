@@ -20,7 +20,7 @@ const usage = `ccx: switch Claude accounts inside a live session, via a local pr
   ccx rm <name>            delete a saved profile
   ccx serve [--port N]     run the proxy Claude Code talks to
   ccx usage                per-account rate-limit usage the proxy has observed
-  ccx env                  print the env vars that point Claude Code at the proxy
+  ccx env [bash]           print the env vars that point Claude Code at the proxy
   ccx install              start the proxy at logon (Windows scheduled task)
   ccx uninstall            remove the logon task
 
@@ -58,7 +58,7 @@ func run(args []string) error {
 	case "serve", "proxy":
 		return cmdServe(p, args[1:])
 	case "env":
-		return cmdEnv()
+		return cmdEnv(args[1:])
 	case "usage":
 		return cmdUsage()
 	case "install":
@@ -221,10 +221,15 @@ func cmdUsage() error {
 	return nil
 }
 
-func cmdEnv() error {
+func cmdEnv(args []string) error {
 	port := defaultPort
 	if v := os.Getenv("CCX_PORT"); v != "" {
 		port = v
+	}
+	if len(args) > 0 && args[0] == "bash" {
+		fmt.Printf("export ANTHROPIC_BASE_URL=\"http://127.0.0.1:%s\"\n", port)
+		fmt.Printf("export ANTHROPIC_AUTH_TOKEN=\"ccx-proxy\"\n")
+		return nil
 	}
 	fmt.Printf("$env:ANTHROPIC_BASE_URL = \"http://127.0.0.1:%s\"\n", port)
 	fmt.Printf("$env:ANTHROPIC_AUTH_TOKEN = \"ccx-proxy\"\n")
