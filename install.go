@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const taskName = "ccx-proxy"
@@ -36,6 +38,52 @@ func registerTask() error {
 	action := fmt.Sprintf(`"%s" serve --hidden`, exe)
 	return schtasks("/Create", "/TN", taskName, "/TR", action,
 		"/SC", "ONLOGON", "/RL", "LIMITED", "/F")
+}
+
+// cmdRestart repoints the logon task at the current binary, stops the running
+// proxy, and starts it again, so a rebuilt exe takes over without a logout.
+func cmdRestart() error {
+	if runtime.GOOS != "windows" {
+		return fmt.Errorf("ccx restart currently supports Windows only")
+	}
+	if err := registerTask(); err != nil {
+		return err
+	}
+	port := defaultPort
+	if v := os.Getenv("CCX_PORT"); v != "" {
+		port = v
+	}
+
+	_ = schtasks("/End", "/TN", taskName)
+	waitProxy(port, false, 3*time.Second)
+
+	if err := schtasks("/Run", "/TN", taskName); err != nil {
+		return err
+	}
+	if !waitProxy(port, true, 5*time.Second) {
+		return fmt.Errorf("task started but proxy did not come up on port %s", port)
+	}
+	fmt.Printf("restarted %q on the current binary\n", taskName)
+	return nil
+}
+
+// waitProxy polls /ccx/status until the proxy's reachability matches up, or the
+// timeout elapses, returning whether the wanted state was reached.
+func waitProxy(port string, up bool, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		resp, err := http.Get("http://127.0.0.1:" + port + "/ccx/status")
+		if err == nil {
+			resp.Body.Close()
+		}
+		if (err == nil) == up {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func cmdUninstall() error {

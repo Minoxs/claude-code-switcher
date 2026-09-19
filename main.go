@@ -23,6 +23,7 @@ const usage = `ccx: switch Claude accounts inside a live session, via a local pr
   ccx env [bash]           print the env vars that point Claude Code at the proxy
   ccx ping [-v]            exit 0 if the proxy is up, non-zero otherwise
   ccx install              start the proxy at logon (Windows scheduled task)
+  ccx restart              restart the installed proxy on the current binary
   ccx uninstall            remove the logon task
 
 Load accounts by logging into each one in Claude Code, then ccx add <name>.
@@ -66,6 +67,8 @@ func run(args []string) error {
 		return cmdPing(args[1:])
 	case "install":
 		return cmdInstall()
+	case "restart":
+		return cmdRestart()
 	case "uninstall":
 		return cmdUninstall()
 	case "help", "-h", "--help":
