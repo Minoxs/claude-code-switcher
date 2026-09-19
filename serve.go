@@ -47,6 +47,8 @@ type manager struct {
 
 func (p paths) activeFile() string { return filepath.Join(p.claudeDir, "switcher", "active") }
 
+func (p paths) usageFile() string { return filepath.Join(p.claudeDir, "switcher", "usage.json") }
+
 func (p paths) readActive() string {
 	data, err := os.ReadFile(p.activeFile())
 	if err != nil {
@@ -67,13 +69,15 @@ func newManager(p paths) *manager {
 	if v := os.Getenv("CCX_OAUTH_CLIENT_ID"); v != "" {
 		clientID = v
 	}
-	return &manager{
+	m := &manager{
 		p:            p,
 		clientID:     clientID,
 		active:       p.readActive(),
 		usage:        map[string]usageSnapshot{},
 		limitedUntil: map[string]time.Time{},
 	}
+	m.loadUsage()
+	return m
 }
 
 // switchTo makes name the account every subsequent request uses.
@@ -269,6 +273,38 @@ func (m *manager) recordUsage(account string, h http.Header) {
 	m.mu.Lock()
 	m.usage[account] = snap
 	m.mu.Unlock()
+	m.saveUsage()
+}
+
+// loadUsage restores the snapshots recorded before the last shutdown so ccx
+// usage is not blank until fresh traffic arrives.
+func (m *manager) loadUsage() {
+	data, err := os.ReadFile(m.p.usageFile())
+	if err != nil {
+		return
+	}
+	var saved map[string]usageSnapshot
+	if err := json.Unmarshal(data, &saved); err != nil || saved == nil {
+		return
+	}
+	m.mu.Lock()
+	m.usage = saved
+	m.mu.Unlock()
+}
+
+// saveUsage writes the current snapshots through to disk. It runs after every
+// recorded response because the proxy is terminated, not asked to shut down.
+func (m *manager) saveUsage() {
+	m.mu.Lock()
+	data, err := json.Marshal(m.usage)
+	m.mu.Unlock()
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(m.p.usageFile()), 0o700); err != nil {
+		return
+	}
+	_ = os.WriteFile(m.p.usageFile(), data, 0o600)
 }
 
 func (m *manager) usageSnapshot(account string) (usageSnapshot, bool) {
