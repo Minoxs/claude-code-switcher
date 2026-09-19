@@ -17,7 +17,7 @@ const tokenEndpoint = "https://claude.ai/v1/oauth/token"
 
 // refreshSkew refreshes a token this long before it actually expires, so an
 // in-flight request never carries a token that dies mid-forward.
-const refreshSkew = 60 * time.Minute
+const refreshSkew = 5 * time.Minute
 
 // oauthCreds mirrors the claudeAiOauth object inside .credentials.json.
 type oauthCreds struct {
