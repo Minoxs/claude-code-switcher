@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -164,8 +165,8 @@ func controlSwitch(name string) (string, bool) {
 	if v := os.Getenv("CCX_PORT"); v != "" {
 		port = v
 	}
-	url := "http://127.0.0.1:" + port + "/ccx/switch?name=" + name
-	resp, err := http.Get(url)
+	endpoint := "http://127.0.0.1:" + port + "/ccx/switch?name=" + url.QueryEscape(name)
+	resp, err := http.Get(endpoint)
 	if err != nil {
 		return "", false
 	}
