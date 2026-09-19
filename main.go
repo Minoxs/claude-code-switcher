@@ -82,13 +82,10 @@ func cmdList(p paths) error {
 		fmt.Println("no saved accounts. run: ccx add <name>")
 		return nil
 	}
-	active := ""
-	if live, err := p.captureLive(); err == nil {
-		active = accountUUID(live.OAuthAccount)
-	}
+	active := p.readActive()
 	for _, prof := range profs {
 		mark := " "
-		if accountUUID(prof.Identity.OAuthAccount) == active && active != "" {
+		if prof.Name == active && active != "" {
 			mark = "*"
 		}
 		fmt.Printf("%s %-16s %s\n", mark, prof.Name, prof.Email)
