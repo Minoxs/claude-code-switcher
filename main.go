@@ -21,6 +21,7 @@ const usage = `ccx: switch Claude accounts inside a live session, via a local pr
   ccx serve [--port N]     run the proxy Claude Code talks to
   ccx usage                per-account rate-limit usage the proxy has observed
   ccx env [bash]           print the env vars that point Claude Code at the proxy
+  ccx ping                 exit 0 if the proxy is up, non-zero otherwise
   ccx install              start the proxy at logon (Windows scheduled task)
   ccx uninstall            remove the logon task
 
@@ -61,6 +62,8 @@ func run(args []string) error {
 		return cmdEnv(args[1:])
 	case "usage":
 		return cmdUsage()
+	case "ping":
+		return cmdPing()
 	case "install":
 		return cmdInstall(p)
 	case "uninstall":
@@ -217,6 +220,22 @@ func cmdUsage() error {
 			fmt.Printf("    %-48s %s\n", strings.TrimPrefix(k, "anthropic-ratelimit-"), a.Headers[k])
 		}
 		fmt.Printf("    (as of %s)\n", a.ObservedAt)
+	}
+	return nil
+}
+
+func cmdPing() error {
+	port := defaultPort
+	if v := os.Getenv("CCX_PORT"); v != "" {
+		port = v
+	}
+	resp, err := http.Get("http://127.0.0.1:" + port + "/ccx/status")
+	if err != nil {
+		return fmt.Errorf("no proxy on port %s", port)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("proxy on port %s returned %d", port, resp.StatusCode)
 	}
 	return nil
 }
