@@ -60,6 +60,10 @@ func run(args []string) error {
 		return cmdEnv()
 	case "usage":
 		return cmdUsage()
+	case "install":
+		return cmdInstall(p)
+	case "uninstall":
+		return cmdUninstall()
 	case "help", "-h", "--help":
 		fmt.Println(usage)
 		return nil
