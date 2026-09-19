@@ -23,7 +23,17 @@ const defaultOAuthBeta = "oauth-2025-04-20"
 
 type ctxKey int
 
-const tokenKey ctxKey = 0
+const (
+	tokenKey   ctxKey = 0
+	accountKey ctxKey = 1
+)
+
+// usageSnapshot holds the rate-limit headers observed on an account's last
+// response, verbatim, so ccx never has to guess Anthropic's claim names.
+type usageSnapshot struct {
+	ObservedAt time.Time         `json:"observedAt"`
+	Headers    map[string]string `json:"headers"`
+}
 
 // manager owns the live account selection and keeps its token fresh. It is the
 // sole refresher of every stored account, so refresh-token rotation never
@@ -35,6 +45,7 @@ type manager struct {
 	mu     sync.Mutex
 	active string
 	prof   *Profile
+	usage  map[string]usageSnapshot
 }
 
 func (p paths) activeFile() string { return filepath.Join(p.claudeDir, "switcher", "active") }
@@ -59,7 +70,7 @@ func newManager(p paths) *manager {
 	if v := os.Getenv("CCX_OAUTH_CLIENT_ID"); v != "" {
 		clientID = v
 	}
-	return &manager{p: p, clientID: clientID, active: p.readActive()}
+	return &manager{p: p, clientID: clientID, active: p.readActive(), usage: map[string]usageSnapshot{}}
 }
 
 // switchTo makes name the account every subsequent request uses.
@@ -75,44 +86,70 @@ func (m *manager) switchTo(name string) error {
 	return m.p.writeActive(name)
 }
 
-// token returns a valid access token for the active account, refreshing and
-// persisting the rotated credentials when the current one is near expiry.
-func (m *manager) token() (string, error) {
+// token returns a valid access token for the active account and its name,
+// refreshing and persisting the rotated credentials when the current one is
+// near expiry.
+func (m *manager) token() (string, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.prof == nil {
 		if m.active == "" {
-			return "", fmt.Errorf("no active account; run: ccx use <name>")
+			return "", "", fmt.Errorf("no active account; run: ccx use <name>")
 		}
 		prof, err := m.p.loadProfile(m.active)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		m.prof = &prof
 	}
 
 	creds, err := parseCreds(m.prof.Identity.Credentials)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if !creds.expired() {
-		return creds.AccessToken, nil
+		return creds.AccessToken, m.active, nil
 	}
 
 	fresh, err := refresh(creds, m.clientID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	raw, err := json.Marshal(fresh)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	m.prof.Identity.Credentials = raw
 	if err := m.p.saveProfile(*m.prof); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return fresh.AccessToken, nil
+	return fresh.AccessToken, m.active, nil
+}
+
+// recordUsage snapshots the unified rate-limit headers from a forwarded
+// response against the account that made the request.
+func (m *manager) recordUsage(account string, h http.Header) {
+	snap := usageSnapshot{ObservedAt: time.Now(), Headers: map[string]string{}}
+	for key, vals := range h {
+		lower := strings.ToLower(key)
+		if strings.HasPrefix(lower, "anthropic-ratelimit-") {
+			snap.Headers[lower] = strings.Join(vals, ", ")
+		}
+	}
+	if len(snap.Headers) == 0 {
+		return
+	}
+	m.mu.Lock()
+	m.usage[account] = snap
+	m.mu.Unlock()
+}
+
+func (m *manager) usageSnapshot(account string) (usageSnapshot, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	snap, ok := m.usage[account]
+	return snap, ok
 }
 
 func (m *manager) status() string {
@@ -166,6 +203,12 @@ func cmdServe(p paths, args []string) error {
 				pr.Out.Header.Set("x-app", "cli")
 			}
 		},
+		ModifyResponse: func(resp *http.Response) error {
+			if account, ok := resp.Request.Context().Value(accountKey).(string); ok {
+				mgr.recordUsage(account, resp.Header)
+			}
+			return nil
+		},
 		FlushInterval: -1, // stream SSE token-by-token instead of buffering
 	}
 
@@ -174,12 +217,13 @@ func cmdServe(p paths, args []string) error {
 		handleControl(mgr, w, r)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		token, err := mgr.token()
+		token, account, err := mgr.token()
 		if err != nil {
 			http.Error(w, "ccx: "+err.Error(), http.StatusBadGateway)
 			return
 		}
 		ctx := context.WithValue(r.Context(), tokenKey, token)
+		ctx = context.WithValue(ctx, accountKey, account)
 		proxy.ServeHTTP(w, r.WithContext(ctx))
 	})
 
@@ -211,9 +255,30 @@ func handleControl(mgr *manager, w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "switched to %s\n", mgr.status())
 	case "/ccx/status":
 		fmt.Fprintln(w, mgr.status())
+	case "/ccx/usage":
+		handleUsage(mgr, w)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func handleUsage(mgr *manager, w http.ResponseWriter) {
+	profs, err := mgr.p.listProfiles()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := map[string]any{}
+	for _, prof := range profs {
+		entry := map[string]any{"email": prof.Email}
+		if snap, ok := mgr.usageSnapshot(prof.Name); ok {
+			entry["observedAt"] = snap.ObservedAt
+			entry["headers"] = snap.Headers
+		}
+		out[prof.Name] = entry
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func mergeBeta(existing, add string) string {
