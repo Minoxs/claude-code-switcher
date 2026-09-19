@@ -16,13 +16,7 @@ func cmdInstall() error {
 	if runtime.GOOS != "windows" {
 		return fmt.Errorf("ccx install currently supports Windows only")
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	action := fmt.Sprintf(`"%s" serve --hidden`, exe)
-	if err := schtasks("/Create", "/TN", taskName, "/TR", action,
-		"/SC", "ONLOGON", "/RL", "LIMITED", "/F"); err != nil {
+	if err := registerTask(); err != nil {
 		return err
 	}
 	if err := schtasks("/Run", "/TN", taskName); err != nil {
@@ -30,6 +24,18 @@ func cmdInstall() error {
 	}
 	fmt.Printf("installed %q, starts at logon and is running now\n", taskName)
 	return nil
+}
+
+// registerTask points the logon task at the current binary, creating or
+// overwriting it. Running it again after replacing the exe repoints the task.
+func registerTask() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	action := fmt.Sprintf(`"%s" serve --hidden`, exe)
+	return schtasks("/Create", "/TN", taskName, "/TR", action,
+		"/SC", "ONLOGON", "/RL", "LIMITED", "/F")
 }
 
 func cmdUninstall() error {
