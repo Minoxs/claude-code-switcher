@@ -41,6 +41,7 @@ type manager struct {
 	prof         *Profile
 	usage        map[string]usageSnapshot
 	limitedUntil map[string]time.Time
+	primeAttempt map[string]time.Time
 
 	refreshMu sync.Mutex
 }
@@ -75,6 +76,7 @@ func newManager(p paths) *manager {
 		active:       p.readActive(),
 		usage:        map[string]usageSnapshot{},
 		limitedUntil: map[string]time.Time{},
+		primeAttempt: map[string]time.Time{},
 	}
 	m.loadUsage()
 	return m
@@ -333,6 +335,7 @@ func cmdServe(p paths, args []string) error {
 		port = v
 	}
 	hidden := false
+	autostart := os.Getenv("CCX_AUTOSTART") == "1" || strings.EqualFold(os.Getenv("CCX_AUTOSTART"), "true")
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--port":
@@ -342,6 +345,8 @@ func cmdServe(p paths, args []string) error {
 			}
 		case "--hidden":
 			hidden = true
+		case "--autostart":
+			autostart = true
 		}
 	}
 	if hidden {
@@ -375,6 +380,13 @@ func cmdServe(p paths, args []string) error {
 	fmt.Printf("ccx proxy on http://%s  -> %s\n", addr, upstreamStr)
 	fmt.Printf("active account: %s\n", mgr.status())
 	fmt.Printf("point Claude Code at it:\n  ANTHROPIC_BASE_URL=http://%s\n  ANTHROPIC_AUTH_TOKEN=ccx-proxy\n", addr)
+
+	if autostart {
+		if profs, err := mgr.p.listProfiles(); err == nil && len(profs) > 0 {
+			fmt.Printf("autostart: priming idle accounts, offset %s\n", shortDur(primeWindow/time.Duration(len(profs))))
+		}
+		go mgr.runAutostart(upstream, beta)
+	}
 
 	srv := &http.Server{
 		Addr:              addr,
