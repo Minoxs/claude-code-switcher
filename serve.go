@@ -1,0 +1,232 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+)
+
+const defaultPort = "8787"
+const defaultUpstream = "https://api.anthropic.com"
+
+// The OAuth capability Claude Code requests carry. Gateway mode drops it, so
+// the proxy re-adds it before forwarding to the subscription backend.
+const defaultOAuthBeta = "oauth-2025-04-20"
+
+type ctxKey int
+
+const tokenKey ctxKey = 0
+
+// manager owns the live account selection and keeps its token fresh. It is the
+// sole refresher of every stored account, so refresh-token rotation never
+// collides with Claude Code.
+type manager struct {
+	p        paths
+	clientID string
+
+	mu     sync.Mutex
+	active string
+	prof   *Profile
+}
+
+func (p paths) activeFile() string { return filepath.Join(p.claudeDir, "switcher", "active") }
+
+func (p paths) readActive() string {
+	data, err := os.ReadFile(p.activeFile())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func (p paths) writeActive(name string) error {
+	if err := os.MkdirAll(filepath.Dir(p.activeFile()), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(p.activeFile(), []byte(name+"\n"), 0o600)
+}
+
+func newManager(p paths) *manager {
+	clientID := defaultClientID
+	if v := os.Getenv("CCX_OAUTH_CLIENT_ID"); v != "" {
+		clientID = v
+	}
+	return &manager{p: p, clientID: clientID, active: p.readActive()}
+}
+
+// switchTo makes name the account every subsequent request uses.
+func (m *manager) switchTo(name string) error {
+	prof, err := m.p.loadProfile(name)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.active = name
+	m.prof = &prof
+	m.mu.Unlock()
+	return m.p.writeActive(name)
+}
+
+// token returns a valid access token for the active account, refreshing and
+// persisting the rotated credentials when the current one is near expiry.
+func (m *manager) token() (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.prof == nil {
+		if m.active == "" {
+			return "", fmt.Errorf("no active account; run: ccx use <name>")
+		}
+		prof, err := m.p.loadProfile(m.active)
+		if err != nil {
+			return "", err
+		}
+		m.prof = &prof
+	}
+
+	creds, err := parseCreds(m.prof.Identity.Credentials)
+	if err != nil {
+		return "", err
+	}
+	if !creds.expired() {
+		return creds.AccessToken, nil
+	}
+
+	fresh, err := refresh(creds, m.clientID)
+	if err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(fresh)
+	if err != nil {
+		return "", err
+	}
+	m.prof.Identity.Credentials = raw
+	if err := m.p.saveProfile(*m.prof); err != nil {
+		return "", err
+	}
+	return fresh.AccessToken, nil
+}
+
+func (m *manager) status() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.active == "" {
+		return "(none)"
+	}
+	email := ""
+	if m.prof != nil {
+		email = m.prof.Email
+	}
+	return fmt.Sprintf("%s %s", m.active, email)
+}
+
+func cmdServe(p paths, args []string) error {
+	port := defaultPort
+	if v := os.Getenv("CCX_PORT"); v != "" {
+		port = v
+	}
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--port" && i+1 < len(args) {
+			port = args[i+1]
+			i++
+		}
+	}
+
+	upstreamStr := defaultUpstream
+	if v := os.Getenv("CCX_UPSTREAM"); v != "" {
+		upstreamStr = v
+	}
+	upstream, err := url.Parse(upstreamStr)
+	if err != nil {
+		return err
+	}
+	beta := defaultOAuthBeta
+	if v := os.Getenv("CCX_OAUTH_BETA"); v != "" {
+		beta = v
+	}
+
+	mgr := newManager(p)
+
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(upstream)
+			pr.Out.Host = upstream.Host
+			pr.Out.Header.Del("X-Api-Key")
+			pr.Out.Header.Set("Authorization", "Bearer "+pr.In.Context().Value(tokenKey).(string))
+			pr.Out.Header.Set("anthropic-beta", mergeBeta(pr.Out.Header.Get("anthropic-beta"), beta))
+			if pr.Out.Header.Get("x-app") == "" {
+				pr.Out.Header.Set("x-app", "cli")
+			}
+		},
+		FlushInterval: -1, // stream SSE token-by-token instead of buffering
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ccx/", func(w http.ResponseWriter, r *http.Request) {
+		handleControl(mgr, w, r)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		token, err := mgr.token()
+		if err != nil {
+			http.Error(w, "ccx: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		ctx := context.WithValue(r.Context(), tokenKey, token)
+		proxy.ServeHTTP(w, r.WithContext(ctx))
+	})
+
+	addr := "127.0.0.1:" + port
+	fmt.Printf("ccx proxy on http://%s  -> %s\n", addr, upstreamStr)
+	fmt.Printf("active account: %s\n", mgr.status())
+	fmt.Printf("point Claude Code at it:\n  ANTHROPIC_BASE_URL=http://%s\n  ANTHROPIC_AUTH_TOKEN=ccx-proxy\n", addr)
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	return srv.ListenAndServe()
+}
+
+func handleControl(mgr *manager, w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/ccx/switch":
+		name := strings.TrimSpace(r.URL.Query().Get("name"))
+		if name == "" {
+			http.Error(w, "missing name", http.StatusBadRequest)
+			return
+		}
+		if err := mgr.switchTo(name); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		fmt.Fprintf(w, "switched to %s\n", mgr.status())
+	case "/ccx/status":
+		fmt.Fprintln(w, mgr.status())
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func mergeBeta(existing, add string) string {
+	if add == "" {
+		return existing
+	}
+	for _, part := range strings.Split(existing, ",") {
+		if strings.TrimSpace(part) == add {
+			return existing
+		}
+	}
+	if existing == "" {
+		return add
+	}
+	return existing + "," + add
+}

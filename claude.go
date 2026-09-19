@@ -66,33 +66,6 @@ func (p paths) captureLive() (Identity, error) {
 	return Identity{OAuthAccount: oauth, UserID: userID, Credentials: blob}, nil
 }
 
-// apply writes an identity into the live files, preserving every other key.
-func (p paths) apply(id Identity) error {
-	cfg, err := readObject(p.configJSON)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", p.configJSON, err)
-	}
-	cfg["oauthAccount"] = id.OAuthAccount
-	uid, err := json.Marshal(id.UserID)
-	if err != nil {
-		return err
-	}
-	cfg["userID"] = uid
-	if err := writeObject(p.configJSON, cfg); err != nil {
-		return fmt.Errorf("write %s: %w", p.configJSON, err)
-	}
-
-	creds, err := readObject(p.credsJSON)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", p.credsJSON, err)
-	}
-	creds["claudeAiOauth"] = id.Credentials
-	if err := writeObject(p.credsJSON, creds); err != nil {
-		return fmt.Errorf("write %s: %w", p.credsJSON, err)
-	}
-	return nil
-}
-
 // accountUUID pulls the stable id out of an oauthAccount blob for matching.
 func accountUUID(oauth json.RawMessage) string {
 	var v struct {
@@ -122,25 +95,3 @@ func readObject(path string) (map[string]json.RawMessage, error) {
 	return m, nil
 }
 
-// writeObject serializes to a temp file in the same directory and renames it
-// over the target, so a crash mid-write cannot truncate the live config.
-func writeObject(path string, m map[string]json.RawMessage) error {
-	data, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".ccx-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
-}

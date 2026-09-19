@@ -2,23 +2,24 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"os"
-	"os/exec"
 )
 
-const usage = `ccx: switch between Claude accounts, keeping one shared config.
+const usage = `ccx: switch Claude accounts inside a live session, via a local proxy.
 
+  ccx add [name]           save the currently logged-in account as a profile
   ccx list                 saved accounts, with a * on the active one
-  ccx current              the account logged in right now
-  ccx add [name]           save the current account as a profile
-  ccx use <name>           swap to a saved account (takes effect next launch)
-  ccx use <name> -r        swap, then run claude --resume in this directory
-  ccx use <name> -c        swap, then run claude --continue in this directory
+  ccx current              the account logged in on disk right now
+  ccx use <name>           make <name> active; a running proxy switches instantly
   ccx rm <name>            delete a saved profile
+  ccx serve [--port N]     run the proxy Claude Code talks to
+  ccx env                  print the env vars that point Claude Code at the proxy
 
-A swap rewrites only the account identity and tokens. Sessions, settings,
-skills, plugins and history are shared and left untouched, so a conversation
-started on one account resumes on another.`
+Load accounts by logging into each one in Claude Code, then ccx add <name>.
+Run ccx serve, point Claude Code at it with ccx env, and ccx use flips the
+active account for the next request of the live session, no restart.`
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -47,6 +48,10 @@ func run(args []string) error {
 		return cmdUse(p, args[1:])
 	case "rm", "remove", "delete":
 		return cmdRemove(p, args[1:])
+	case "serve", "proxy":
+		return cmdServe(p, args[1:])
+	case "env":
+		return cmdEnv()
 	case "help", "-h", "--help":
 		fmt.Println(usage)
 		return nil
@@ -118,43 +123,53 @@ func cmdAdd(p paths, args []string) error {
 
 func cmdUse(p paths, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: ccx use <name> [-r|-c]")
+		return fmt.Errorf("usage: ccx use <name>")
 	}
 	name, err := profileName(args[0])
 	if err != nil {
 		return err
 	}
-	launch := ""
-	for _, a := range args[1:] {
-		switch a {
-		case "-r", "--resume":
-			launch = "--resume"
-		case "-c", "--continue":
-			launch = "--continue"
-		default:
-			return fmt.Errorf("unknown flag %q", a)
-		}
-	}
-
 	prof, err := p.loadProfile(name)
 	if err != nil {
 		return err
 	}
-	if err := p.apply(prof.Identity); err != nil {
+	if err := p.writeActive(name); err != nil {
 		return err
 	}
-	fmt.Printf("switched to %q (%s)\n", prof.Name, prof.Email)
 
-	if launch == "" {
+	if reply, ok := controlSwitch(name); ok {
+		fmt.Print(reply)
 		return nil
 	}
-	claude, err := lookupClaude()
-	if err != nil {
-		return err
+	fmt.Printf("selected %q (%s). start ccx serve to activate it\n", prof.Name, prof.Email)
+	return nil
+}
+
+// controlSwitch asks a running proxy to flip the active account. Returns false
+// when no proxy is listening.
+func controlSwitch(name string) (string, bool) {
+	port := defaultPort
+	if v := os.Getenv("CCX_PORT"); v != "" {
+		port = v
 	}
-	cmd := exec.Command(claude, launch)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd.Run()
+	url := "http://127.0.0.1:" + port + "/ccx/switch?name=" + name
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return string(body), resp.StatusCode == http.StatusOK
+}
+
+func cmdEnv() error {
+	port := defaultPort
+	if v := os.Getenv("CCX_PORT"); v != "" {
+		port = v
+	}
+	fmt.Printf("$env:ANTHROPIC_BASE_URL = \"http://127.0.0.1:%s\"\n", port)
+	fmt.Printf("$env:ANTHROPIC_AUTH_TOKEN = \"ccx-proxy\"\n")
+	return nil
 }
 
 func cmdRemove(p paths, args []string) error {
@@ -173,13 +188,4 @@ func cmdRemove(p paths, args []string) error {
 	}
 	fmt.Printf("removed %q\n", name)
 	return nil
-}
-
-func lookupClaude() (string, error) {
-	for _, name := range []string{"claude", "claude.cmd", "claude.exe"} {
-		if path, err := exec.LookPath(name); err == nil {
-			return path, nil
-		}
-	}
-	return "", fmt.Errorf("claude not found on PATH")
 }
