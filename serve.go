@@ -46,6 +46,8 @@ type manager struct {
 	active string
 	prof   *Profile
 	usage  map[string]usageSnapshot
+
+	refreshMu sync.Mutex
 }
 
 func (p paths) activeFile() string { return filepath.Join(p.claudeDir, "switcher", "active") }
@@ -91,25 +93,28 @@ func (m *manager) switchTo(name string) error {
 // near expiry.
 func (m *manager) token() (string, string, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.prof == nil {
-		if m.active == "" {
-			return "", "", fmt.Errorf("no active account; run: ccx use <name>")
-		}
-		prof, err := m.p.loadProfile(m.active)
-		if err != nil {
-			return "", "", err
-		}
-		m.prof = &prof
-	}
-
-	creds, err := parseCreds(m.prof.Identity.Credentials)
+	name, creds, err := m.currentCredsLocked()
+	m.mu.Unlock()
 	if err != nil {
 		return "", "", err
 	}
 	if !creds.expired() {
-		return creds.AccessToken, m.active, nil
+		return creds.AccessToken, name, nil
+	}
+
+	// Serialize refreshes so a burst of expired requests rotates the token
+	// once, and never hold m.mu across the network call.
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+
+	m.mu.Lock()
+	name, creds, err = m.currentCredsLocked()
+	m.mu.Unlock()
+	if err != nil {
+		return "", "", err
+	}
+	if !creds.expired() {
+		return creds.AccessToken, name, nil
 	}
 
 	fresh, err := refresh(creds, m.clientID)
@@ -120,11 +125,48 @@ func (m *manager) token() (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	m.prof.Identity.Credentials = raw
-	if err := m.p.saveProfile(*m.prof); err != nil {
+	if err := m.persistCreds(name, raw); err != nil {
 		return "", "", err
 	}
-	return fresh.AccessToken, m.active, nil
+	return fresh.AccessToken, name, nil
+}
+
+// currentCredsLocked resolves the active account and its parsed credentials,
+// loading the profile from disk the first time. Caller holds m.mu.
+func (m *manager) currentCredsLocked() (string, oauthCreds, error) {
+	if m.prof == nil {
+		if m.active == "" {
+			return "", oauthCreds{}, fmt.Errorf("no active account; run: ccx use <name>")
+		}
+		prof, err := m.p.loadProfile(m.active)
+		if err != nil {
+			return "", oauthCreds{}, err
+		}
+		m.prof = &prof
+	}
+	creds, err := parseCreds(m.prof.Identity.Credentials)
+	return m.active, creds, err
+}
+
+// persistCreds writes rotated credentials for name to disk. It saves by name
+// even if the active account changed mid-refresh, so a rotated refresh token
+// is never dropped once the old one is invalidated upstream.
+func (m *manager) persistCreds(name string, raw json.RawMessage) error {
+	m.mu.Lock()
+	if m.prof != nil && m.active == name {
+		m.prof.Identity.Credentials = raw
+		prof := *m.prof
+		m.mu.Unlock()
+		return m.p.saveProfile(prof)
+	}
+	m.mu.Unlock()
+
+	prof, err := m.p.loadProfile(name)
+	if err != nil {
+		return err
+	}
+	prof.Identity.Credentials = raw
+	return m.p.saveProfile(prof)
 }
 
 // recordUsage snapshots the unified rate-limit headers from a forwarded
