@@ -20,7 +20,7 @@ const usage = `ccx: switch Claude accounts inside a live session, via a local pr
   ccx current              the account logged in on disk right now
   ccx use <name>           make <name> active; a running proxy switches instantly
   ccx rm <name>            delete a saved profile
-  ccx serve [--port N]     run the proxy Claude Code talks to
+  ccx serve [--port N]     run the proxy; add --autostart to stagger account windows
   ccx usage                per-account rate-limit usage the proxy has observed
   ccx env [bash]           print the env vars that point Claude Code at the proxy
   ccx ping [-v]            exit 0 if the proxy is up, non-zero otherwise
