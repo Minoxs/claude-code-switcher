@@ -381,7 +381,7 @@ func cmdServe(p paths, args []string) error {
 	addr := "127.0.0.1:" + port
 	fmt.Printf("ccx proxy on http://%s  -> %s\n", addr, upstreamStr)
 	fmt.Printf("active account: %s\n", mgr.status())
-	fmt.Printf("point Claude Code at it:\n  ANTHROPIC_BASE_URL=http://%s\n  ANTHROPIC_AUTH_TOKEN=ccx-proxy\n  CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000\n  ANTHROPIC_BETAS=context-1m-2025-08-07\n", addr)
+	fmt.Printf("point Claude Code at it:\n  ANTHROPIC_BASE_URL=http://%s\n  ANTHROPIC_AUTH_TOKEN=ccx-proxy\n", addr)
 
 	if autostart {
 		if profs, err := mgr.p.listProfiles(); err == nil && len(profs) > 0 {
