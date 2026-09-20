@@ -43,6 +43,7 @@ type manager struct {
 
 	mu           sync.Mutex
 	active       string
+	serving      string
 	prof         *Profile
 	usage        map[string]usageSnapshot
 	limitedUntil map[string]time.Time
@@ -167,6 +168,25 @@ func (m *manager) candidates() []string {
 func (m *manager) activeName() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.active
+}
+
+// setServing records the account that last handled a forwarded request, which
+// rotation can move off the chosen account without repointing the selection.
+func (m *manager) setServing(name string) {
+	m.mu.Lock()
+	m.serving = name
+	m.mu.Unlock()
+}
+
+// servingName is the account currently answering requests, falling back to the
+// chosen account before any request has been forwarded.
+func (m *manager) servingName() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.serving != "" {
+		return m.serving
+	}
 	return m.active
 }
 
@@ -456,12 +476,14 @@ func (m *manager) forward(upstream *url.URL, beta string, w http.ResponseWriter,
 			}
 			// Every account is limited; hand the 429 back. candidates already
 			// parks on the soonest to reset, so the chosen account is untouched.
+			m.setServing(name)
 			streamResponse(w, resp)
 			resp.Body.Close()
 			return
 		}
 
 		m.clearLimited(name)
+		m.setServing(name)
 		streamResponse(w, resp)
 		resp.Body.Close()
 		return
@@ -607,9 +629,9 @@ func handleUsage(mgr *manager, w http.ResponseWriter) {
 	}
 	now := time.Now()
 	out := map[string]any{}
-	active := mgr.activeName()
+	serving := mgr.servingName()
 	for _, prof := range profs {
-		entry := map[string]any{"email": prof.Email, "active": prof.Name == active}
+		entry := map[string]any{"email": prof.Email, "active": prof.Name == serving}
 		if snap, ok := mgr.usageSnapshot(prof.Name); ok {
 			entry["observedAt"] = snap.ObservedAt
 			entry["model"] = snap.Model
