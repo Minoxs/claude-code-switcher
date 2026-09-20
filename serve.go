@@ -162,28 +162,6 @@ func (m *manager) clearLimited(name string) {
 	m.mu.Unlock()
 }
 
-// soonestLimited returns whichever of names resets from its cooldown first, so
-// an all-limited fleet parks on the account that recovers next.
-func (m *manager) soonestLimited(names []string) string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	best := ""
-	var bestAt time.Time
-	for _, name := range names {
-		until, ok := m.limitedUntil[name]
-		if !ok {
-			continue
-		}
-		if best == "" || until.Before(bestAt) {
-			best, bestAt = name, until
-		}
-	}
-	if best == "" {
-		return m.active
-	}
-	return best
-}
-
 // loadCreds returns the named profile and its parsed credentials, using the
 // cached active profile when it matches.
 func (m *manager) loadCreds(name string) (Profile, oauthCreds, error) {
@@ -451,17 +429,14 @@ func (m *manager) forward(upstream *url.URL, beta string, w http.ResponseWriter,
 				resp.Body.Close()
 				continue
 			}
-			// Every account is limited; park on the one that recovers first.
-			_ = m.switchTo(m.soonestLimited(names))
+			// Every account is limited; hand the 429 back. candidates already
+			// parks on the soonest to reset, so the chosen account is untouched.
 			streamResponse(w, resp)
 			resp.Body.Close()
 			return
 		}
 
 		m.clearLimited(name)
-		if name != m.activeName() {
-			_ = m.switchTo(name)
-		}
 		streamResponse(w, resp)
 		resp.Body.Close()
 		return
