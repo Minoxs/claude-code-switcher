@@ -117,7 +117,7 @@ func (m *manager) prime(upstream *url.URL, beta, name string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	m.recordUsage(name, resp.Header)
+	m.recordUsage(name, requestModel(body), false, resp.Header)
 	if resp.StatusCode == http.StatusTooManyRequests {
 		m.markLimited(name, resetAfter(resp))
 	}

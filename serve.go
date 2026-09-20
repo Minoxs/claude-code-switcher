@@ -26,6 +26,8 @@ const defaultOAuthBeta = "oauth-2025-04-20"
 // response, verbatim, so ccx never has to guess Anthropic's claim names.
 type usageSnapshot struct {
 	ObservedAt time.Time         `json:"observedAt"`
+	Model      string            `json:"model,omitempty"`
+	Context1M  bool              `json:"context1m,omitempty"`
 	Headers    map[string]string `json:"headers"`
 }
 
@@ -261,8 +263,8 @@ func (m *manager) persistCreds(name string, raw json.RawMessage) error {
 
 // recordUsage snapshots the unified rate-limit headers from a forwarded
 // response against the account that made the request.
-func (m *manager) recordUsage(account string, h http.Header) {
-	snap := usageSnapshot{ObservedAt: time.Now(), Headers: map[string]string{}}
+func (m *manager) recordUsage(account, model string, ctx1m bool, h http.Header) {
+	snap := usageSnapshot{ObservedAt: time.Now(), Model: model, Context1M: ctx1m, Headers: map[string]string{}}
 	for key, vals := range h {
 		lower := strings.ToLower(key)
 		if strings.HasPrefix(lower, "anthropic-ratelimit-") {
@@ -415,6 +417,9 @@ func (m *manager) forward(upstream *url.URL, beta string, w http.ResponseWriter,
 		return
 	}
 
+	model := requestModel(body)
+	ctx1m := strings.Contains(r.Header.Get("anthropic-beta"), "context-1m")
+
 	for i, name := range names {
 		last := i == len(names)-1
 
@@ -435,7 +440,7 @@ func (m *manager) forward(upstream *url.URL, beta string, w http.ResponseWriter,
 			}
 			continue
 		}
-		m.recordUsage(name, resp.Header)
+		m.recordUsage(name, model, ctx1m, resp.Header)
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			m.markLimited(name, resetAfter(resp))
@@ -584,12 +589,24 @@ func handleUsage(mgr *manager, w http.ResponseWriter) {
 		entry := map[string]any{"email": prof.Email}
 		if snap, ok := mgr.usageSnapshot(prof.Name); ok {
 			entry["observedAt"] = snap.ObservedAt
+			entry["model"] = snap.Model
+			entry["context1m"] = snap.Context1M
 			entry["headers"] = snap.Headers
 		}
 		out[prof.Name] = entry
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// requestModel pulls the model an inbound request names, so ccx usage can show
+// what Claude Code actually put on the wire rather than what its picker claims.
+func requestModel(body []byte) string {
+	var v struct {
+		Model string `json:"model"`
+	}
+	_ = json.Unmarshal(body, &v)
+	return v.Model
 }
 
 func mergeBeta(existing, add string) string {
