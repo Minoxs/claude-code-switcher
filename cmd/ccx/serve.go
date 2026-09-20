@@ -202,6 +202,21 @@ func (m *manager) clearLimited(name string) {
 	m.mu.Unlock()
 }
 
+// soonestReset is the earliest instant any account leaves its cooldown, so a
+// fully-limited fleet reports the nearest reopening rather than whichever
+// account happened to answer last
+func (m *manager) soonestReset() (time.Time, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var soonest time.Time
+	for _, until := range m.limitedUntil {
+		if soonest.IsZero() || until.Before(soonest) {
+			soonest = until
+		}
+	}
+	return soonest, !soonest.IsZero()
+}
+
 // loadCreds returns the named profile and its parsed credentials, using the
 // cached active profile when it matches.
 func (m *manager) loadCreds(name string) (Profile, oauthCreds, error) {
@@ -474,9 +489,14 @@ func (m *manager) forward(upstream *url.URL, beta string, w http.ResponseWriter,
 				resp.Body.Close()
 				continue
 			}
-			// Every account is limited; hand the 429 back. candidates already
-			// parks on the soonest to reset, so the chosen account is untouched.
+			// Every account is limited. Hand the 429 back with Retry-After set
+			// to the soonest account reset, so Claude Code retries the moment
+			// any window reopens rather than waiting on whichever answered last
 			m.setServing(name)
+			if reset, ok := m.soonestReset(); ok {
+				setRetryAfter(resp, reset)
+				log.Printf("all accounts limited; soonest reset %s", reset.Format(time.RFC3339))
+			}
 			streamResponse(w, resp)
 			resp.Body.Close()
 			return
@@ -554,6 +574,17 @@ func isHopHeader(key string) bool {
 		return true
 	}
 	return false
+}
+
+// setRetryAfter overwrites Retry-After with the seconds until reset, so a
+// handed-back 429 points the client at the nearest reopening across the fleet
+// rather than the account that answered
+func setRetryAfter(resp *http.Response, reset time.Time) {
+	secs := int(time.Until(reset).Round(time.Second).Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	resp.Header.Set("Retry-After", strconv.Itoa(secs))
 }
 
 // resetAfter reads when a rate-limited account will accept requests again,
