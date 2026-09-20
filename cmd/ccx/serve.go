@@ -489,12 +489,13 @@ func (m *manager) forward(upstream *url.URL, beta string, w http.ResponseWriter,
 				resp.Body.Close()
 				continue
 			}
-			// Every account is limited. Hand the 429 back with Retry-After set
-			// to the soonest account reset, so Claude Code retries the moment
-			// any window reopens rather than waiting on whichever answered last
+			// Every account is limited. Rewrite the unified rate-limit headers
+			// to one fleet-wide window that resets when the soonest account
+			// does, so Claude Code arms its auto-continue for the instant the
+			// proxy regains capacity rather than whichever account answered last
 			m.setServing(name)
 			if reset, ok := m.soonestReset(); ok {
-				setRetryAfter(resp, reset)
+				rewriteLimitHeaders(resp, reset)
 				log.Printf("all accounts limited; soonest reset %s", reset.Format(time.RFC3339))
 			}
 			streamResponse(w, resp)
@@ -585,6 +586,19 @@ func setRetryAfter(resp *http.Response, reset time.Time) {
 		secs = 1
 	}
 	resp.Header.Set("Retry-After", strconv.Itoa(secs))
+}
+
+// rewriteLimitHeaders collapses a handed-back 429 onto one fleet-wide window.
+// Claude Code re-derives its rate-limit state from the unified headers per
+// response, so pointing the reset at the soonest account arms its auto-continue
+// timer for the moment the proxy regains capacity. Only the 5h and aggregate
+// reset move; the weekly window is left as the serving account reported it.
+func rewriteLimitHeaders(resp *http.Response, reset time.Time) {
+	epoch := strconv.FormatInt(reset.Unix(), 10)
+	resp.Header.Set("anthropic-ratelimit-unified-reset", epoch)
+	resp.Header.Set("anthropic-ratelimit-unified-5h-reset", epoch)
+	resp.Header.Set("anthropic-ratelimit-unified-status", "rejected")
+	setRetryAfter(resp, reset)
 }
 
 // resetAfter reads when a rate-limited account will accept requests again,
