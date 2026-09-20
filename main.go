@@ -22,7 +22,7 @@ const usage = `ccx: switch Claude accounts inside a live session, via a local pr
   ccx rm <name>            delete a saved profile
   ccx serve [--port N]     run the proxy; add --autostart to stagger account windows
   ccx usage                per-account rate-limit usage the proxy has observed
-  ccx usage --refresh      ping every account first, then show live usage
+  ccx usage --refresh      refresh open-window accounts, then show live usage
   ccx env [bash]           print the env vars that point Claude Code at the proxy
   ccx ping [-v]            exit 0 if the proxy is up, non-zero otherwise
   ccx install              start the proxy at logon (Windows scheduled task)
