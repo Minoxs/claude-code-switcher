@@ -35,7 +35,7 @@ func registerTask() error {
 	if err != nil {
 		return err
 	}
-	action := fmt.Sprintf(`"%s" serve --hidden`, exe)
+	action := fmt.Sprintf(`"%s" serve --hidden --autostart`, exe)
 	return schtasks("/Create", "/TN", taskName, "/TR", action,
 		"/SC", "ONLOGON", "/RL", "LIMITED", "/F")
 }
