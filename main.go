@@ -18,7 +18,7 @@ const usage = `ccx: switch Claude accounts inside a live session, via a local pr
   ccx add [name]           save the currently logged-in account as a profile
   ccx list                 saved accounts, with a * on the active one
   ccx current              the account logged in on disk right now
-  ccx use <name>           make <name> active; a running proxy switches instantly
+  ccx use <name>           swap the on-disk login to <name>; a running proxy also flips live
   ccx rm <name>            delete a saved profile
   ccx serve [--port N]     run the proxy; add --autostart to stagger account windows
   ccx usage                per-account rate-limit usage the proxy has observed
@@ -154,12 +154,15 @@ func cmdUse(p paths, args []string) error {
 	if err := p.writeActive(name); err != nil {
 		return err
 	}
+	if err := p.applyLive(prof); err != nil {
+		return err
+	}
 
 	if reply, ok := controlSwitch(name); ok {
 		fmt.Print(reply)
 		return nil
 	}
-	fmt.Printf("selected %q (%s). start ccx serve to activate it\n", prof.Name, prof.Email)
+	fmt.Printf("switched to %q (%s)\n", prof.Name, prof.Email)
 	return nil
 }
 

@@ -66,6 +66,48 @@ func (p paths) captureLive() (Identity, error) {
 	return Identity{OAuthAccount: oauth, UserID: userID, Credentials: blob}, nil
 }
 
+// applyLive writes prof's account into the on-disk config and credentials, so a
+// Claude Code session talking straight to Anthropic, not the proxy, runs as this
+// account. It is the inverse of captureLive.
+func (p paths) applyLive(prof Profile) error {
+	cfg, err := readObject(p.configJSON)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", p.configJSON, err)
+	}
+	cfg["oauthAccount"] = prof.Identity.OAuthAccount
+	if prof.Identity.UserID != "" {
+		uid, err := json.Marshal(prof.Identity.UserID)
+		if err != nil {
+			return err
+		}
+		cfg["userID"] = uid
+	}
+	if err := writeObject(p.configJSON, cfg); err != nil {
+		return err
+	}
+
+	creds, err := readObject(p.credsJSON)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", p.credsJSON, err)
+	}
+	creds["claudeAiOauth"] = prof.Identity.Credentials
+	return writeObject(p.credsJSON, creds)
+}
+
+// writeObject serializes m and swaps it into place with a rename, so a crash
+// mid-write cannot leave ~/.claude.json truncated.
+func writeObject(path string, m map[string]json.RawMessage) error {
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".ccx.tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // accountUUID pulls the stable id out of an oauthAccount blob for matching.
 func accountUUID(oauth json.RawMessage) string {
 	var v struct {
