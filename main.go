@@ -197,6 +197,8 @@ func cmdUsage() error {
 	var accounts map[string]struct {
 		Email      string            `json:"email"`
 		ObservedAt string            `json:"observedAt"`
+		Model      string            `json:"model"`
+		Context1M  bool              `json:"context1m"`
 		Headers    map[string]string `json:"headers"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&accounts); err != nil {
@@ -217,6 +219,13 @@ func cmdUsage() error {
 	for _, name := range names {
 		a := accounts[name]
 		fmt.Printf("%s  %s\n", name, a.Email)
+		if a.Model != "" {
+			ctx := ""
+			if a.Context1M {
+				ctx = " (1M)"
+			}
+			fmt.Printf("    %-24s %s%s\n", "model", a.Model, ctx)
+		}
 		if len(a.Headers) == 0 {
 			fmt.Println("    no requests seen yet")
 			continue
