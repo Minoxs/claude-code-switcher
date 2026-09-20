@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -53,6 +54,25 @@ type manager struct {
 func (p paths) activeFile() string { return filepath.Join(p.claudeDir, "switcher", "active") }
 
 func (p paths) usageFile() string { return filepath.Join(p.claudeDir, "switcher", "usage.json") }
+
+func (p paths) logFile() string { return filepath.Join(p.claudeDir, "switcher", "proxy.log") }
+
+// setupLog points the standard logger at the switcher log file so a hidden
+// proxy leaves a trace even with no console attached. It tees to stderr for the
+// foreground run.
+func setupLog(p paths) error {
+	if err := os.MkdirAll(filepath.Dir(p.logFile()), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(p.logFile(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	log.SetOutput(io.MultiWriter(os.Stderr, f))
+	log.SetFlags(log.LstdFlags)
+	log.SetPrefix("ccx ")
+	return nil
+}
 
 func (p paths) readActive() string {
 	data, err := os.ReadFile(p.activeFile())
@@ -334,6 +354,9 @@ func cmdServe(p paths, args []string) error {
 	if hidden {
 		hideConsole()
 	}
+	if err := setupLog(p); err != nil {
+		fmt.Fprintln(os.Stderr, "ccx: log: "+err.Error())
+	}
 
 	upstreamStr := defaultUpstream
 	if v := os.Getenv("CCX_UPSTREAM"); v != "" {
@@ -406,6 +429,7 @@ func (m *manager) forward(upstream *url.URL, beta string, w http.ResponseWriter,
 
 		token, err := m.tokenFor(name)
 		if err != nil {
+			log.Printf("account %s: token: %v", name, err)
 			if last {
 				http.Error(w, "ccx: "+err.Error(), http.StatusBadGateway)
 				return
@@ -415,6 +439,7 @@ func (m *manager) forward(upstream *url.URL, beta string, w http.ResponseWriter,
 
 		resp, err := http.DefaultTransport.RoundTrip(buildUpstream(r, body, upstream, token, beta))
 		if err != nil {
+			log.Printf("account %s: upstream: %v", name, err)
 			if last {
 				http.Error(w, "ccx: upstream: "+err.Error(), http.StatusBadGateway)
 				return
@@ -568,7 +593,9 @@ func (m *manager) refreshAll(upstream *url.URL, beta string) {
 		return
 	}
 	for _, prof := range profs {
-		_ = m.prime(upstream, beta, prof.Name)
+		if err := m.prime(upstream, beta, prof.Name); err != nil {
+			log.Printf("refresh %s: %v", prof.Name, err)
+		}
 	}
 }
 
