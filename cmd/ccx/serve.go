@@ -408,6 +408,13 @@ func cmdServe(p paths, args []string) error {
 
 	mgr := newManager(p)
 	mgr.autostart = autostart
+	if name := mgr.pickSoonest(time.Now()); name != "" && name != mgr.activeName() {
+		if err := mgr.switchTo(name); err != nil {
+			log.Printf("startup pick %s: %v", name, err)
+		} else {
+			log.Printf("startup: serving %s, its window resets soonest", name)
+		}
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ccx/", func(w http.ResponseWriter, r *http.Request) {

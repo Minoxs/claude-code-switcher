@@ -90,6 +90,35 @@ func (m *manager) windowReset(name string, now time.Time) (time.Time, bool) {
 	return parseReset(snap.Headers["anthropic-ratelimit-unified-5h-reset"], now)
 }
 
+// pickSoonest returns the account whose open 5h window resets soonest and is
+// not already at its limit, so the proxy spends the budget nearest to expiring
+// before it is lost. It returns "" when no open window qualifies.
+func (m *manager) pickSoonest(now time.Time) string {
+	profs, err := m.p.listProfiles()
+	if err != nil {
+		return ""
+	}
+	best := ""
+	var bestReset time.Time
+	for _, prof := range profs {
+		snap, ok := m.usageSnapshot(prof.Name)
+		if !ok {
+			continue
+		}
+		if snap.Headers["anthropic-ratelimit-unified-5h-status"] == "rejected" {
+			continue
+		}
+		reset, ok := parseReset(snap.Headers["anthropic-ratelimit-unified-5h-reset"], now)
+		if !ok || !reset.After(now) {
+			continue
+		}
+		if best == "" || reset.Before(bestReset) {
+			best, bestReset = prof.Name, reset
+		}
+	}
+	return best
+}
+
 // shouldPrime records an attempt and reports whether the retry gap has elapsed,
 // so a failing prime does not repeat every tick.
 func (m *manager) shouldPrime(name string, now time.Time) bool {
