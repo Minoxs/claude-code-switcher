@@ -125,6 +125,46 @@ func (m *manager) prime(upstream *url.URL, beta, name string) error {
 	return nil
 }
 
+// nextPrime is the instant autostart will next consider priming the account,
+// the start of its stagger slot within the current window cycle. It reports
+// false when autostart is off, so callers can tell "not scheduled" from "due".
+func (m *manager) nextPrime(name string, now time.Time) (time.Time, bool) {
+	if !m.autostart {
+		return time.Time{}, false
+	}
+	profs, err := m.p.listProfiles()
+	if err != nil || len(profs) == 0 {
+		return time.Time{}, false
+	}
+	order := autostartOrder(m.activeName(), profs)
+	idx := indexOf(order, name)
+	if idx < 0 {
+		return time.Time{}, false
+	}
+	offset := primeWindow / time.Duration(len(order))
+	ref := m.referenceStart(order[0], now)
+	pos := now.Sub(ref) % primeWindow
+	slot := time.Duration(idx) * offset
+
+	switch {
+	case pos < slot:
+		return now.Add(slot - pos), true
+	case pos < slot+offset:
+		return now, true
+	default:
+		return now.Add(primeWindow - pos + slot), true
+	}
+}
+
+func indexOf(names []string, name string) int {
+	for i, n := range names {
+		if n == name {
+			return i
+		}
+	}
+	return -1
+}
+
 // autostartOrder puts the active account first, then the rest by name, so the
 // active account anchors the stagger and the others fill the window behind it.
 func autostartOrder(active string, profs []Profile) []string {

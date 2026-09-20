@@ -38,6 +38,8 @@ type manager struct {
 	p        paths
 	clientID string
 
+	autostart bool
+
 	mu           sync.Mutex
 	active       string
 	prof         *Profile
@@ -369,6 +371,7 @@ func cmdServe(p paths, args []string) error {
 	}
 
 	mgr := newManager(p)
+	mgr.autostart = autostart
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ccx/", func(w http.ResponseWriter, r *http.Request) {
@@ -600,6 +603,7 @@ func handleUsage(mgr *manager, w http.ResponseWriter) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	now := time.Now()
 	out := map[string]any{}
 	for _, prof := range profs {
 		entry := map[string]any{"email": prof.Email}
@@ -608,6 +612,9 @@ func handleUsage(mgr *manager, w http.ResponseWriter) {
 			entry["model"] = snap.Model
 			entry["context1m"] = snap.Context1M
 			entry["headers"] = snap.Headers
+		}
+		if t, ok := mgr.nextPrime(prof.Name, now); ok {
+			entry["nextPrime"] = t
 		}
 		out[prof.Name] = entry
 	}
