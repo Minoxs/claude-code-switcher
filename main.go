@@ -186,6 +186,7 @@ func controlSwitch(name string) (string, bool) {
 
 type usageAccount struct {
 	Email      string            `json:"email"`
+	Active     bool              `json:"active"`
 	ObservedAt string            `json:"observedAt"`
 	Model      string            `json:"model"`
 	Context1M  bool              `json:"context1m"`
@@ -251,9 +252,13 @@ func readUsageDisk(p paths) (map[string]usageAccount, error) {
 	if data, err := os.ReadFile(p.usageFile()); err == nil {
 		_ = json.Unmarshal(data, &snaps)
 	}
+	var liveUUID string
+	if live, err := p.captureLive(); err == nil {
+		liveUUID = accountUUID(live.OAuthAccount)
+	}
 	out := map[string]usageAccount{}
 	for _, prof := range profs {
-		acc := usageAccount{Email: prof.Email}
+		acc := usageAccount{Email: prof.Email, Active: liveUUID != "" && accountUUID(prof.Identity.OAuthAccount) == liveUUID}
 		if snap, ok := snaps[prof.Name]; ok {
 			acc.ObservedAt = snap.ObservedAt.Format(time.RFC3339Nano)
 			acc.Model = snap.Model
@@ -275,7 +280,11 @@ func renderUsage(accounts map[string]usageAccount) {
 	now := time.Now()
 	for _, name := range names {
 		a := accounts[name]
-		fmt.Printf("%s  %s\n", name, a.Email)
+		mark := ""
+		if a.Active {
+			mark = " (in use)"
+		}
+		fmt.Printf("%s  %s%s\n", name, a.Email, mark)
 		if a.Model != "" {
 			ctx := ""
 			if a.Context1M {

@@ -605,8 +605,9 @@ func handleUsage(mgr *manager, w http.ResponseWriter) {
 	}
 	now := time.Now()
 	out := map[string]any{}
+	active := mgr.activeName()
 	for _, prof := range profs {
-		entry := map[string]any{"email": prof.Email}
+		entry := map[string]any{"email": prof.Email, "active": prof.Name == active}
 		if snap, ok := mgr.usageSnapshot(prof.Name); ok {
 			entry["observedAt"] = snap.ObservedAt
 			entry["model"] = snap.Model
