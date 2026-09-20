@@ -150,6 +150,11 @@ func (m *manager) nextPrime(name string, now time.Time) (time.Time, bool) {
 	if idx < 0 {
 		return time.Time{}, false
 	}
+	// An open window is never reprimed, so the soonest a prime can land is when
+	// it closes; the slot time alone would show a prime the tick would skip
+	if reset, ok := m.windowReset(name, now); ok && reset.After(now) {
+		return reset, true
+	}
 	offset := primeWindow / time.Duration(len(order))
 	ref := m.referenceStart(order[0], now)
 	pos := now.Sub(ref) % primeWindow
