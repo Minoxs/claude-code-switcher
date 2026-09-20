@@ -606,15 +606,19 @@ func handleControl(mgr *manager, upstream *url.URL, beta string, w http.Response
 	}
 }
 
-// refreshAll pings every account once so ccx usage reflects live limits without
-// waiting for Claude Code traffic. Anthropic only returns the unified limits on
-// a real request, so an idle account's window opens as a side effect.
+// refreshAll re-pings the accounts whose usage window is already open so ccx
+// usage reflects live limits. It leaves a closed window alone: priming one would
+// force it open and collapse the autostart stagger.
 func (m *manager) refreshAll(upstream *url.URL, beta string) {
 	profs, err := m.p.listProfiles()
 	if err != nil {
 		return
 	}
+	now := time.Now()
 	for _, prof := range profs {
+		if !m.windowRunning(prof.Name, now) {
+			continue
+		}
 		if err := m.prime(upstream, beta, prof.Name); err != nil {
 			log.Printf("refresh %s: %v", prof.Name, err)
 		}
