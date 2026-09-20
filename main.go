@@ -349,13 +349,13 @@ func cmdEnv(args []string) error {
 	if len(args) > 0 && args[0] == "bash" {
 		fmt.Printf("export ANTHROPIC_BASE_URL=\"http://127.0.0.1:%s\"\n", port)
 		fmt.Printf("export ANTHROPIC_AUTH_TOKEN=\"ccx-proxy\"\n")
-		fmt.Printf("export CLAUDE_CODE_MAX_CONTEXT_TOKENS=\"1000000\"\n")
+		fmt.Printf("export _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=\"1\"\n")
 		fmt.Printf("export ANTHROPIC_BETAS=\"context-1m-2025-08-07\"\n")
 		return nil
 	}
 	fmt.Printf("$env:ANTHROPIC_BASE_URL = \"http://127.0.0.1:%s\"\n", port)
 	fmt.Printf("$env:ANTHROPIC_AUTH_TOKEN = \"ccx-proxy\"\n")
-	fmt.Printf("$env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = \"1000000\"\n")
+	fmt.Printf("$env:_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL = \"1\"\n")
 	fmt.Printf("$env:ANTHROPIC_BETAS = \"context-1m-2025-08-07\"\n")
 	return nil
 }
