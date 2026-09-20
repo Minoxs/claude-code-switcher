@@ -489,11 +489,16 @@ func (m *manager) forward(upstream *url.URL, beta string, w http.ResponseWriter,
 				resp.Body.Close()
 				continue
 			}
-			// Every account is limited. Rewrite the unified rate-limit headers
-			// to one fleet-wide window that resets when the soonest account
-			// does, so Claude Code arms its auto-continue for the instant the
-			// proxy regains capacity rather than whichever account answered last
+			// Every account is limited. A streaming request gets the mid-stream
+			// limit shape (200 with the unified headers, then a rate-limit error
+			// event), which Claude Code surfaces with the reset and can auto-
+			// continue, unlike the flat upfront 429 it renders as a dead error.
 			m.setServing(name)
+			if requestStream(body) {
+				m.serveLimited(upstream, beta, w, r, body, model, ctx1m, resp)
+				resp.Body.Close()
+				return
+			}
 			if reset, ok := m.soonestReset(); ok {
 				rewriteLimitHeaders(resp, reset)
 				log.Printf("all accounts limited; soonest reset %s", reset.Format(time.RFC3339))
@@ -509,6 +514,149 @@ func (m *manager) forward(upstream *url.URL, beta string, w http.ResponseWriter,
 		resp.Body.Close()
 		return
 	}
+}
+
+// tryForward makes one pass over the current candidates and returns the first
+// response that is not a 429, recording usage and cooldowns as it goes. The
+// bool is false when every candidate is still limited or unreachable.
+func (m *manager) tryForward(upstream *url.URL, beta string, r *http.Request, body []byte, model string, ctx1m bool) (*http.Response, bool) {
+	for _, name := range m.candidates() {
+		token, err := m.tokenFor(name)
+		if err != nil {
+			log.Printf("account %s: token: %v", name, err)
+			continue
+		}
+		resp, err := http.DefaultTransport.RoundTrip(buildUpstream(r, body, upstream, token, beta))
+		if err != nil {
+			log.Printf("account %s: upstream: %v", name, err)
+			continue
+		}
+		m.recordUsage(name, model, ctx1m, resp.Header)
+		if resp.StatusCode == http.StatusTooManyRequests {
+			m.markLimited(name, resetAfter(resp))
+			resp.Body.Close()
+			continue
+		}
+		m.clearLimited(name)
+		m.setServing(name)
+		return resp, true
+	}
+	return nil, false
+}
+
+// limitPing is how often serveLimited writes an SSE keepalive while holding a
+// request open, so the client's idle timeout does not fire during the wait.
+const limitPing = 10 * time.Second
+
+// maxHold bounds how long serveLimited keeps a request open waiting for a
+// window to reopen. A longer wait would trip the client's own request timeout,
+// so past it the proxy emits the rate-limit error and lets Claude Code schedule
+// its retry instead of holding a doomed connection.
+const maxHold = 5 * time.Minute
+
+// serveLimited answers a streaming request when every account is limited. It
+// commits to a 200 event-stream carrying the unified rate-limit headers, the
+// shape Claude Code reads as a mid-stream limit. When the soonest window is
+// within maxHold it holds the stream alive and forwards for real once it
+// reopens; otherwise it emits a rate-limit error event carrying the reset.
+func (m *manager) serveLimited(upstream *url.URL, beta string, w http.ResponseWriter, r *http.Request, body []byte, model string, ctx1m bool, limit *http.Response) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		if reset, ok := m.soonestReset(); ok {
+			rewriteLimitHeaders(limit, reset)
+		}
+		streamResponse(w, limit)
+		return
+	}
+
+	reset, ok := m.soonestReset()
+	if !ok {
+		reset = time.Now().Add(time.Hour)
+	}
+
+	dst := w.Header()
+	for key, vals := range limit.Header {
+		if strings.HasPrefix(strings.ToLower(key), "anthropic-ratelimit-") {
+			dst[key] = append([]string(nil), vals...)
+		}
+	}
+	epoch := strconv.FormatInt(reset.Unix(), 10)
+	dst.Set("anthropic-ratelimit-unified-reset", epoch)
+	dst.Set("anthropic-ratelimit-unified-5h-reset", epoch)
+	dst.Set("anthropic-ratelimit-unified-status", "rejected")
+	dst.Set("Content-Type", "text/event-stream")
+	dst.Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	log.Printf("all accounts limited; soonest reset %s", reset.Format(time.RFC3339))
+
+	ctx := r.Context()
+	deadline := time.Now().Add(maxHold)
+	ping := time.NewTicker(limitPing)
+	defer ping.Stop()
+	for {
+		if !time.Now().Before(reset) {
+			if resp, served := m.tryForward(upstream, beta, r, body, model, ctx1m); served {
+				if resp.StatusCode == http.StatusOK {
+					pipeStream(w, resp, flusher)
+				} else {
+					relayStreamError(w, flusher, resp)
+				}
+				resp.Body.Close()
+				return
+			}
+			if next, ok := m.soonestReset(); ok {
+				reset = next
+			}
+		}
+		if reset.After(deadline) {
+			writeRateLimitEvent(w, flusher, reset)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ping.C:
+			io.WriteString(w, ": keepalive\n\n")
+			flusher.Flush()
+		}
+	}
+}
+
+// pipeStream copies an already-headered upstream body to the client, flushing
+// each chunk so a held stream resumes token by token once served.
+func pipeStream(w io.Writer, resp *http.Response, flusher http.Flusher) {
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			flusher.Flush()
+		}
+		if rerr != nil {
+			return
+		}
+	}
+}
+
+// writeRateLimitEvent ends a held stream with an Anthropic-shaped rate-limit
+// error naming the reset, so Claude Code surfaces when usage returns.
+func writeRateLimitEvent(w io.Writer, flusher http.Flusher, reset time.Time) {
+	msg := fmt.Sprintf("All accounts are rate-limited; usage resets %s", humanReset(reset, time.Now()))
+	data := fmt.Sprintf(`{"type":"error","error":{"type":"rate_limit_error","message":%q}}`, msg)
+	fmt.Fprintf(w, "event: error\ndata: %s\n\n", data)
+	flusher.Flush()
+}
+
+// relayStreamError forwards a non-429 upstream failure as an error event, since
+// the response was already committed to an event-stream before the retry ran.
+func relayStreamError(w io.Writer, flusher http.Flusher, resp *http.Response) {
+	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	fmt.Fprintf(w, "event: error\ndata: %s\n\n", strings.TrimSpace(string(payload)))
+	flusher.Flush()
 }
 
 // buildUpstream rewrites an inbound request for the subscription backend: it
@@ -704,6 +852,16 @@ func requestModel(body []byte) string {
 	}
 	_ = json.Unmarshal(body, &v)
 	return v.Model
+}
+
+// requestStream reports whether an inbound request asked for a streamed reply,
+// so the proxy only holds and re-frames requests it can keep alive.
+func requestStream(body []byte) bool {
+	var v struct {
+		Stream bool `json:"stream"`
+	}
+	_ = json.Unmarshal(body, &v)
+	return v.Stream
 }
 
 func mergeBeta(existing, add string) string {
