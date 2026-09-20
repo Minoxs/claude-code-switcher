@@ -22,6 +22,7 @@ const usage = `ccx: switch Claude accounts inside a live session, via a local pr
   ccx rm <name>            delete a saved profile
   ccx serve [--port N]     run the proxy; add --autostart to stagger account windows
   ccx usage                per-account rate-limit usage the proxy has observed
+  ccx usage --refresh      ping every account first, then show live usage
   ccx env [bash]           print the env vars that point Claude Code at the proxy
   ccx ping [-v]            exit 0 if the proxy is up, non-zero otherwise
   ccx install              start the proxy at logon (Windows scheduled task)
@@ -64,7 +65,7 @@ func run(args []string) error {
 	case "env":
 		return cmdEnv(args[1:])
 	case "usage":
-		return cmdUsage()
+		return cmdUsage(args[1:])
 	case "ping":
 		return cmdPing(args[1:])
 	case "install":
@@ -183,12 +184,18 @@ func controlSwitch(name string) (string, bool) {
 	return string(body), resp.StatusCode == http.StatusOK
 }
 
-func cmdUsage() error {
+func cmdUsage(args []string) error {
 	port := defaultPort
 	if v := os.Getenv("CCX_PORT"); v != "" {
 		port = v
 	}
-	resp, err := http.Get("http://127.0.0.1:" + port + "/ccx/usage")
+	path := "/ccx/usage"
+	for _, a := range args {
+		if a == "--refresh" || a == "-r" {
+			path = "/ccx/refresh"
+		}
+	}
+	resp, err := http.Get("http://127.0.0.1:" + port + path)
 	if err != nil {
 		return fmt.Errorf("no proxy on port %s; start it with ccx serve", port)
 	}
