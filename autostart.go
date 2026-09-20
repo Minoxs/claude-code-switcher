@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -56,7 +59,9 @@ func (m *manager) autostartTick(upstream *url.URL, beta string) {
 		if !m.shouldPrime(name, now) {
 			continue
 		}
-		_ = m.prime(upstream, beta, name)
+		if err := m.prime(upstream, beta, name); err != nil {
+			log.Printf("prime %s: %v", name, err)
+		}
 	}
 }
 
@@ -120,8 +125,12 @@ func (m *manager) prime(upstream *url.URL, beta, name string) error {
 	m.recordUsage(name, requestModel(body), false, resp.Header)
 	if resp.StatusCode == http.StatusTooManyRequests {
 		m.markLimited(name, resetAfter(resp))
+		return nil
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
+	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("upstream %s: %s", resp.Status, strings.TrimSpace(string(payload)))
+	}
 	return nil
 }
 
