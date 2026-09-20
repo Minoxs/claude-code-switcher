@@ -19,8 +19,8 @@ const autostartRetryGap = 10 * time.Minute
 
 // primeBody is a minimal Claude Code request. Subscription OAuth rejects a
 // request whose first system block is not the Claude Code identifier, so the
-// prime carries it verbatim and asks for a single token.
-const primeBody = `{"model":"claude-3-5-haiku-20241022","max_tokens":1,"system":[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}],"messages":[{"role":"user","content":"ok"}]}`
+// prime carries it verbatim and asks for a one-word reply.
+const primeBody = `{"model":"claude-haiku-4-5","max_tokens":5,"system":[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}],"messages":[{"role":"user","content":"emit hi and stop"}]}`
 
 // runAutostart keeps every account's usage window running and staggered. The
 // active account anchors the schedule at its real window start, and each other
