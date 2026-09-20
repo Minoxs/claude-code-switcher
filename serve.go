@@ -372,7 +372,7 @@ func cmdServe(p paths, args []string) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ccx/", func(w http.ResponseWriter, r *http.Request) {
-		handleControl(mgr, w, r)
+		handleControl(mgr, upstream, beta, w, r)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		mgr.forward(upstream, beta, w, r)
@@ -556,8 +556,11 @@ func resetAfter(resp *http.Response) time.Time {
 	return now.Add(time.Hour)
 }
 
-func handleControl(mgr *manager, w http.ResponseWriter, r *http.Request) {
+func handleControl(mgr *manager, upstream *url.URL, beta string, w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
+	case "/ccx/refresh":
+		mgr.refreshAll(upstream, beta)
+		handleUsage(mgr, w)
 	case "/ccx/switch":
 		name := strings.TrimSpace(r.URL.Query().Get("name"))
 		if name == "" {
@@ -575,6 +578,19 @@ func handleControl(mgr *manager, w http.ResponseWriter, r *http.Request) {
 		handleUsage(mgr, w)
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+// refreshAll pings every account once so ccx usage reflects live limits without
+// waiting for Claude Code traffic. Anthropic only returns the unified limits on
+// a real request, so an idle account's window opens as a side effect.
+func (m *manager) refreshAll(upstream *url.URL, beta string) {
+	profs, err := m.p.listProfiles()
+	if err != nil {
+		return
+	}
+	for _, prof := range profs {
+		_ = m.prime(upstream, beta, prof.Name)
 	}
 }
 
