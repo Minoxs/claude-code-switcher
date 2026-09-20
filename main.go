@@ -65,7 +65,7 @@ func run(args []string) error {
 	case "env":
 		return cmdEnv(args[1:])
 	case "usage":
-		return cmdUsage(args[1:])
+		return cmdUsage(p, args[1:])
 	case "ping":
 		return cmdPing(args[1:])
 	case "install":
@@ -184,38 +184,88 @@ func controlSwitch(name string) (string, bool) {
 	return string(body), resp.StatusCode == http.StatusOK
 }
 
-func cmdUsage(args []string) error {
+type usageAccount struct {
+	Email      string            `json:"email"`
+	ObservedAt string            `json:"observedAt"`
+	Model      string            `json:"model"`
+	Context1M  bool              `json:"context1m"`
+	Headers    map[string]string `json:"headers"`
+	NextPrime  string            `json:"nextPrime"`
+}
+
+func cmdUsage(p paths, args []string) error {
 	port := defaultPort
 	if v := os.Getenv("CCX_PORT"); v != "" {
 		port = v
 	}
-	path := "/ccx/usage"
+	refresh := false
 	for _, a := range args {
 		if a == "--refresh" || a == "-r" {
-			path = "/ccx/refresh"
+			refresh = true
 		}
 	}
-	resp, err := http.Get("http://127.0.0.1:" + port + path)
-	if err != nil {
-		return fmt.Errorf("no proxy on port %s; start it with ccx serve", port)
-	}
-	defer resp.Body.Close()
 
-	var accounts map[string]struct {
-		Email      string            `json:"email"`
-		ObservedAt string            `json:"observedAt"`
-		Model      string            `json:"model"`
-		Context1M  bool              `json:"context1m"`
-		Headers    map[string]string `json:"headers"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&accounts); err != nil {
-		return err
+	accounts, err := fetchUsage(port, refresh)
+	if err != nil {
+		if refresh {
+			return fmt.Errorf("no proxy on port %s; refresh needs it running", port)
+		}
+		if accounts, err = readUsageDisk(p); err != nil {
+			return err
+		}
+		fmt.Println("proxy not running; showing last saved usage")
 	}
 	if len(accounts) == 0 {
 		fmt.Println("no saved accounts. run: ccx add <name>")
 		return nil
 	}
+	renderUsage(accounts)
+	return nil
+}
 
+func fetchUsage(port string, refresh bool) (map[string]usageAccount, error) {
+	path := "/ccx/usage"
+	if refresh {
+		path = "/ccx/refresh"
+	}
+	resp, err := http.Get("http://127.0.0.1:" + port + path)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var accounts map[string]usageAccount
+	if err := json.NewDecoder(resp.Body).Decode(&accounts); err != nil {
+		return nil, err
+	}
+	return accounts, nil
+}
+
+// readUsageDisk builds the same account view from the persisted snapshots, so
+// ccx usage still reports the last-known limits when the proxy is not running.
+func readUsageDisk(p paths) (map[string]usageAccount, error) {
+	profs, err := p.listProfiles()
+	if err != nil {
+		return nil, err
+	}
+	snaps := map[string]usageSnapshot{}
+	if data, err := os.ReadFile(p.usageFile()); err == nil {
+		_ = json.Unmarshal(data, &snaps)
+	}
+	out := map[string]usageAccount{}
+	for _, prof := range profs {
+		acc := usageAccount{Email: prof.Email}
+		if snap, ok := snaps[prof.Name]; ok {
+			acc.ObservedAt = snap.ObservedAt.Format(time.RFC3339Nano)
+			acc.Model = snap.Model
+			acc.Context1M = snap.Context1M
+			acc.Headers = snap.Headers
+		}
+		out[prof.Name] = acc
+	}
+	return out, nil
+}
+
+func renderUsage(accounts map[string]usageAccount) {
 	names := make([]string, 0, len(accounts))
 	for name := range accounts {
 		names = append(names, name)
@@ -235,28 +285,30 @@ func cmdUsage(args []string) error {
 		}
 		if len(a.Headers) == 0 {
 			fmt.Println("    no requests seen yet")
-			continue
-		}
-		hkeys := make([]string, 0, len(a.Headers))
-		for k := range a.Headers {
-			hkeys = append(hkeys, k)
-		}
-		sort.Strings(hkeys)
-		for _, k := range hkeys {
-			label := strings.TrimPrefix(k, "anthropic-ratelimit-")
-			value := a.Headers[k]
-			if strings.HasSuffix(k, "reset") {
-				if t, ok := parseReset(value, now); ok {
-					value = humanReset(t, now)
-				}
+		} else {
+			hkeys := make([]string, 0, len(a.Headers))
+			for k := range a.Headers {
+				hkeys = append(hkeys, k)
 			}
-			fmt.Printf("    %-24s %s\n", label, value)
+			sort.Strings(hkeys)
+			for _, k := range hkeys {
+				label := strings.TrimPrefix(k, "anthropic-ratelimit-")
+				value := a.Headers[k]
+				if strings.HasSuffix(k, "reset") {
+					if t, ok := parseReset(value, now); ok {
+						value = humanReset(t, now)
+					}
+				}
+				fmt.Printf("    %-24s %s\n", label, value)
+			}
 		}
 		if t, err := parseObserved(a.ObservedAt); err == nil {
 			fmt.Printf("    seen %s ago\n", shortAgo(now.Sub(t)))
 		}
+		if t, err := parseObserved(a.NextPrime); err == nil {
+			fmt.Printf("    %-24s %s\n", "next prime", humanReset(t, now))
+		}
 	}
-	return nil
 }
 
 // parseReset reads a rate-limit reset value as an RFC3339 timestamp, epoch
