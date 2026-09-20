@@ -207,6 +207,7 @@ func cmdUsage(p paths, args []string) error {
 	}
 
 	accounts, err := fetchUsage(port, refresh)
+	proxyUp := err == nil
 	if err != nil {
 		if refresh {
 			return fmt.Errorf("no proxy on port %s; refresh needs it running", port)
@@ -214,11 +215,15 @@ func cmdUsage(p paths, args []string) error {
 		if accounts, err = readUsageDisk(p); err != nil {
 			return err
 		}
-		fmt.Println("proxy not running; showing last saved usage")
 	}
 	if len(accounts) == 0 {
 		fmt.Println("no saved accounts. run: ccx add <name>")
 		return nil
+	}
+	if proxyUp {
+		fmt.Printf("proxy up on port %s; (in use) = account it is serving\n", port)
+	} else {
+		fmt.Println("proxy down; (in use) = account logged in on disk")
 	}
 	renderUsage(accounts)
 	return nil
