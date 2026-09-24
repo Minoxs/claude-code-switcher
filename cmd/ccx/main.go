@@ -228,7 +228,11 @@ func cmdUsage(p paths, args []string) error {
 	} else {
 		fmt.Println("proxy down; (in use) = account logged in on disk")
 	}
-	renderUsage(accounts)
+	burn := ""
+	if b, ok := p.readBurn(); ok && b.live(time.Now()) {
+		burn = b.Name
+	}
+	renderUsage(accounts, burn)
 	return nil
 }
 
@@ -278,7 +282,7 @@ func readUsageDisk(p paths) (map[string]usageAccount, error) {
 	return out, nil
 }
 
-func renderUsage(accounts map[string]usageAccount) {
+func renderUsage(accounts map[string]usageAccount, burn string) {
 	names := make([]string, 0, len(accounts))
 	for name := range accounts {
 		names = append(names, name)
@@ -291,6 +295,9 @@ func renderUsage(accounts map[string]usageAccount) {
 		mark := ""
 		if a.Active {
 			mark = " (in use)"
+		}
+		if name == burn {
+			mark += " (burning)"
 		}
 		fmt.Printf("%s  %s%s\n", name, a.Email, mark)
 		if a.Model != "" {
