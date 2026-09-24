@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -120,10 +121,11 @@ func (m *manager) switchTo(name string) error {
 	return m.p.writeActive(name)
 }
 
-// candidates lists the accounts to try for a request: the active one first,
-// then the rest by name, dropping any still inside a rate-limit cooldown. When
-// every account is cooling down it returns the single one that resets soonest,
-// so a fully-limited fleet stops rotating and parks there.
+// candidates lists the accounts to try for a request: the burn account first,
+// then the active one, then the rest by name, dropping any still inside a
+// rate-limit cooldown. When every account is cooling down it returns the single
+// one that resets soonest, so a fully-limited fleet stops rotating and parks
+// there.
 func (m *manager) candidates() []string {
 	m.mu.Lock()
 	active := m.active
@@ -136,14 +138,20 @@ func (m *manager) candidates() []string {
 		return []string{active}
 	}
 
-	ordered := []string{active}
+	now := time.Now()
+	ordered := make([]string, 0, len(profs)+1)
+	if burn := m.burning(now); burn != "" && slices.ContainsFunc(profs, func(p Profile) bool { return p.Name == burn }) {
+		ordered = append(ordered, burn)
+	}
+	if !slices.Contains(ordered, active) {
+		ordered = append(ordered, active)
+	}
 	for _, prof := range profs {
-		if prof.Name != active {
+		if !slices.Contains(ordered, prof.Name) {
 			ordered = append(ordered, prof.Name)
 		}
 	}
 
-	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	eligible := make([]string, 0, len(ordered))
@@ -356,6 +364,7 @@ func (m *manager) recordUsage(account, model string, ctx1m bool, h http.Header) 
 	m.usage[account] = snap
 	m.mu.Unlock()
 	m.saveUsage()
+	m.pinBurn(account, snap)
 }
 
 // loadUsage restores the snapshots recorded before the last shutdown so ccx
