@@ -296,6 +296,49 @@ func (m *manager) persistCreds(name string, raw json.RawMessage) error {
 	return m.p.saveProfile(prof)
 }
 
+// reconcileLive adopts a token that rotated on disk while the proxy was off.
+// Claude Code talking straight to Anthropic refreshes the one live account and
+// rotates its single-use refresh token, leaving the matching profile holding a
+// dead one. The valid token then lives only in .credentials.json, so on startup
+// ccx copies it into the profile whose accountUuid matches, and only when the
+// live blob is the newer of the two so a token the proxy rotated last is kept.
+func (m *manager) reconcileLive() {
+	live, err := m.p.captureLive()
+	if err != nil {
+		return
+	}
+	liveCreds, err := parseCreds(live.Credentials)
+	if err != nil {
+		return
+	}
+	uuid := accountUUID(live.OAuthAccount)
+	if uuid == "" {
+		return
+	}
+	profs, err := m.p.listProfiles()
+	if err != nil {
+		return
+	}
+	for _, prof := range profs {
+		if accountUUID(prof.Identity.OAuthAccount) != uuid {
+			continue
+		}
+		stored, err := parseCreds(prof.Identity.Credentials)
+		if err != nil {
+			return
+		}
+		if liveCreds.RefreshToken == stored.RefreshToken || liveCreds.ExpiresAt <= stored.ExpiresAt {
+			return
+		}
+		if err := m.persistCreds(prof.Name, live.Credentials); err != nil {
+			log.Printf("reconcile %s: %v", prof.Name, err)
+			return
+		}
+		log.Printf("reconcile: adopted rotated token for %s from live credentials", prof.Name)
+		return
+	}
+}
+
 // recordUsage snapshots the unified rate-limit headers from a forwarded
 // response against the account that made the request.
 func (m *manager) recordUsage(account, model string, ctx1m bool, h http.Header) {
@@ -408,6 +451,7 @@ func cmdServe(p paths, args []string) error {
 
 	mgr := newManager(p)
 	mgr.autostart = autostart
+	mgr.reconcileLive()
 	if name := mgr.pickSoonest(time.Now()); name != "" && name != mgr.activeName() {
 		if err := mgr.switchTo(name); err != nil {
 			log.Printf("startup pick %s: %v", name, err)
