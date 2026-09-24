@@ -20,6 +20,7 @@ const usage = `ccx: switch Claude accounts inside a live session, via a local pr
   ccx current              the account logged in on disk right now
   ccx use <name>           swap the on-disk login to <name>; a running proxy also flips live
   ccx rm <name>            delete a saved profile
+  ccx burn [name|--off]    spend <name> first until its weekly window resets
   ccx serve [--port N]     run the proxy; add --autostart to stagger account windows
   ccx usage                per-account rate-limit usage the proxy has observed
   ccx usage --refresh      refresh open-window accounts, then show live usage
@@ -60,6 +61,8 @@ func run(args []string) error {
 		return cmdUse(p, args[1:])
 	case "rm", "remove", "delete":
 		return cmdRemove(p, args[1:])
+	case "burn":
+		return cmdBurn(p, args[1:])
 	case "serve", "proxy":
 		return cmdServe(p, args[1:])
 	case "env":
