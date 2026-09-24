@@ -58,6 +58,7 @@ ccx list                 saved accounts, * on the chosen one
 ccx current              the account logged in on disk right now
 ccx use <name>           choose <name>; a running proxy flips to it live
 ccx rm <name>            delete a saved profile
+ccx burn [name|--off]    spend <name> first until its weekly window resets
 ccx serve [--port N]     run the proxy; --autostart to stagger account windows
 ccx usage [--refresh]    per-account rate-limit usage; --refresh re-pings open windows
 ccx env [bash]           print the env vars pointing Claude Code at the proxy
@@ -65,6 +66,16 @@ ccx ping [-v]            exit 0 if the proxy is up
 ccx install              start the proxy at logon (Windows Scheduled Task)
 ccx restart              restart the installed proxy on the current binary
 ccx uninstall            remove the logon task
+```
+
+## Burn
+
+`ccx use` is where you want to be. `ccx burn` is for an account with weekly budget you know will go to waste: the proxy spends it ahead of the chosen account every time it has headroom, and falls back to the usual rotation while it is cooling down. It ends on its own when that account's weekly window resets. **Proxy only.**
+
+```powershell
+ccx burn personal         # spend personal first until its week resets
+ccx burn                  # what is burning, and until when
+ccx burn --off            # stop early
 ```
 
 ## Autostart
