@@ -183,8 +183,15 @@ func (m *manager) activeName() string {
 // rotation can move off the chosen account without repointing the selection.
 func (m *manager) setServing(name string) {
 	m.mu.Lock()
+	prev := m.serving
+	if prev == "" {
+		prev = m.active
+	}
 	m.serving = name
 	m.mu.Unlock()
+	if prev != name {
+		log.Printf("serving: %s -> %s", prev, name)
+	}
 }
 
 // servingName is the account currently answering requests, falling back to the
