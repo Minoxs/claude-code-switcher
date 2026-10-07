@@ -44,11 +44,11 @@ ccx use personal          # now flips the live session mid-conversation
 
 ## How it works
 
-With the proxy in front it is the only thing that talks to Anthropic. Claude Code sends it a request with a throwaway bearer, the proxy rewrites that to the chosen account's real OAuth token, re-adds the subscription OAuth capability Claude Code's gateway mode strips, and forwards it. It is also the sole refresher of every account's token, so refresh-token rotation never races the Claude Code you have open.
+With the proxy in front it is the only thing that talks to Anthropic. Claude Code sends it a request with a throwaway bearer, the proxy rewrites that to the chosen account's real OAuth token, re-adds the subscription OAuth capability Claude Code's gateway mode strips, and forwards it. Refresh tokens are single-use, so the proxy and a Claude Code session logged in on disk keep handing the account's latest token to each other: the proxy picks up a token Claude Code rotated before it refreshes, and writes the one it rotates back to `.credentials.json` when that account is the one logged in.
 
 `ccx use <name>` picks your preferred account and that choice sticks. Rotation on a rate limit is a per-request fallback: if the chosen account is cooling down the proxy serves from another one, but it does not repoint your selection, so the moment your account's window reopens it goes back to using it. When every account is limited it parks on whichever resets soonest and hands the 429 back rather than looping.
 
-Errors the proxy would otherwise swallow (a token refresh that fails, an upstream that rejects a prime) land in `~/.claude/switcher/proxy.log`. The autostart task runs with no console, so that file is where you look when an account stops serving.
+Errors the proxy would otherwise swallow (a token refresh that fails, an upstream that rejects a prime) land in `~/.claude/switcher/proxy.log`, along with every change of the account actually serving requests. The autostart task runs with no console, so that file is where you look when an account stops serving.
 
 ## Commands
 
