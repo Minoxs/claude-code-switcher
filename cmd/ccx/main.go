@@ -151,6 +151,11 @@ func cmdUse(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
+	// The live login is about to be overwritten, and it may hold the only valid
+	// refresh token for the account it belongs to
+	if _, err := p.adoptLive(); err != nil {
+		return err
+	}
 	prof, err := p.loadProfile(name)
 	if err != nil {
 		return err
