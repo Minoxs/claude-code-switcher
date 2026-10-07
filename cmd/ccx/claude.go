@@ -94,6 +94,73 @@ func (p paths) applyLive(prof Profile) error {
 	return writeObject(p.credsJSON, creds)
 }
 
+// adoptLive copies the live login's credentials into the profile for the same
+// account when the live blob is the newer of the two. Claude Code talking
+// straight to Anthropic refreshes the live account and rotates its single-use
+// refresh token, leaving the profile holding a dead one. It returns the name of
+// the profile it updated, or "" when there was nothing to adopt.
+func (p paths) adoptLive() (string, error) {
+	live, err := p.captureLive()
+	if err != nil {
+		return "", nil
+	}
+	liveCreds, err := parseCreds(live.Credentials)
+	if err != nil {
+		return "", nil
+	}
+	uuid := accountUUID(live.OAuthAccount)
+	if uuid == "" {
+		return "", nil
+	}
+	profs, err := p.listProfiles()
+	if err != nil {
+		return "", err
+	}
+	for _, prof := range profs {
+		if accountUUID(prof.Identity.OAuthAccount) != uuid {
+			continue
+		}
+		stored, err := parseCreds(prof.Identity.Credentials)
+		if err != nil {
+			return "", nil
+		}
+		if liveCreds.RefreshToken == stored.RefreshToken {
+			return "", nil
+		}
+		if liveCreds.ExpiresAt <= stored.ExpiresAt {
+			return "", nil
+		}
+		prof.Identity.Credentials = live.Credentials
+		if err := p.saveProfile(prof); err != nil {
+			return "", err
+		}
+		return prof.Name, nil
+	}
+	return "", nil
+}
+
+// writeLiveCreds hands rotated credentials to the live login when it is the
+// same account, so a Claude Code session reading the file does not refresh with
+// the token the proxy just consumed
+func (p paths) writeLiveCreds(uuid string, raw json.RawMessage) error {
+	if uuid == "" {
+		return nil
+	}
+	cfg, err := readObject(p.configJSON)
+	if err != nil {
+		return err
+	}
+	if accountUUID(cfg["oauthAccount"]) != uuid {
+		return nil
+	}
+	creds, err := readObject(p.credsJSON)
+	if err != nil {
+		return err
+	}
+	creds["claudeAiOauth"] = raw
+	return writeObject(p.credsJSON, creds)
+}
+
 // writeObject serializes m and swaps it into place with a rename, so a crash
 // mid-write cannot leave ~/.claude.json truncated.
 func writeObject(path string, m map[string]json.RawMessage) error {

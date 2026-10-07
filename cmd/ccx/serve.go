@@ -225,18 +225,10 @@ func (m *manager) soonestReset() (time.Time, bool) {
 	return soonest, !soonest.IsZero()
 }
 
-// loadCreds returns the named profile and its parsed credentials, using the
-// cached active profile when it matches.
+// loadCreds returns the named profile and its parsed credentials. It reads disk
+// every time because ccx use adopts rotated tokens into profiles behind the
+// proxy's back.
 func (m *manager) loadCreds(name string) (Profile, oauthCreds, error) {
-	m.mu.Lock()
-	if m.prof != nil && m.active == name {
-		prof := *m.prof
-		m.mu.Unlock()
-		creds, err := parseCreds(prof.Identity.Credentials)
-		return prof, creds, err
-	}
-	m.mu.Unlock()
-
 	prof, err := m.p.loadProfile(name)
 	if err != nil {
 		return Profile{}, oauthCreds{}, err
@@ -261,7 +253,10 @@ func (m *manager) tokenFor(name string) (string, error) {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 
-	_, creds, err = m.loadCreds(name)
+	// Claude Code may have already rotated this account's refresh token on
+	// disk, which leaves the profile's copy dead
+	m.reconcileLive()
+	prof, creds, err := m.loadCreds(name)
 	if err != nil {
 		return "", err
 	}
@@ -277,73 +272,27 @@ func (m *manager) tokenFor(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := m.persistCreds(name, raw); err != nil {
+	prof.Identity.Credentials = raw
+	if err := m.p.saveProfile(prof); err != nil {
 		return "", err
 	}
+	if err := m.p.writeLiveCreds(accountUUID(prof.Identity.OAuthAccount), raw); err != nil {
+		log.Printf("account %s: write live credentials: %v", name, err)
+	}
+	log.Printf("account %s: refreshed token", name)
 	return fresh.AccessToken, nil
 }
 
-// persistCreds writes rotated credentials for name to disk. It saves by name
-// even if the active account changed mid-refresh, so a rotated refresh token
-// is never dropped once the old one is invalidated upstream.
-func (m *manager) persistCreds(name string, raw json.RawMessage) error {
-	m.mu.Lock()
-	if m.prof != nil && m.active == name {
-		m.prof.Identity.Credentials = raw
-		prof := *m.prof
-		m.mu.Unlock()
-		return m.p.saveProfile(prof)
-	}
-	m.mu.Unlock()
-
-	prof, err := m.p.loadProfile(name)
-	if err != nil {
-		return err
-	}
-	prof.Identity.Credentials = raw
-	return m.p.saveProfile(prof)
-}
-
-// reconcileLive adopts a token that rotated on disk while the proxy was off.
-// Claude Code talking straight to Anthropic refreshes the one live account and
-// rotates its single-use refresh token, leaving the matching profile holding a
-// dead one. The valid token then lives only in .credentials.json, so on startup
-// ccx copies it into the profile whose accountUuid matches, and only when the
-// live blob is the newer of the two so a token the proxy rotated last is kept.
+// reconcileLive adopts a token Claude Code rotated in the live login into the
+// matching profile.
 func (m *manager) reconcileLive() {
-	live, err := m.p.captureLive()
+	name, err := m.p.adoptLive()
 	if err != nil {
+		log.Printf("reconcile: %v", err)
 		return
 	}
-	liveCreds, err := parseCreds(live.Credentials)
-	if err != nil {
-		return
-	}
-	uuid := accountUUID(live.OAuthAccount)
-	if uuid == "" {
-		return
-	}
-	profs, err := m.p.listProfiles()
-	if err != nil {
-		return
-	}
-	for _, prof := range profs {
-		if accountUUID(prof.Identity.OAuthAccount) != uuid {
-			continue
-		}
-		stored, err := parseCreds(prof.Identity.Credentials)
-		if err != nil {
-			return
-		}
-		if liveCreds.RefreshToken == stored.RefreshToken || liveCreds.ExpiresAt <= stored.ExpiresAt {
-			return
-		}
-		if err := m.persistCreds(prof.Name, live.Credentials); err != nil {
-			log.Printf("reconcile %s: %v", prof.Name, err)
-			return
-		}
-		log.Printf("reconcile: adopted rotated token for %s from live credentials", prof.Name)
-		return
+	if name != "" {
+		log.Printf("reconcile: adopted rotated token for %s from live credentials", name)
 	}
 }
 
