@@ -15,6 +15,7 @@ import (
 
 const usage = `ccx: switch Claude accounts inside a live session, via a local proxy.
 
+  ccx login <name>         sign in again to repair a saved profile's stale token
   ccx add [name]           save the currently logged-in account as a profile
   ccx list                 saved accounts, with a * on the active one
   ccx current              the account logged in on disk right now
@@ -55,6 +56,8 @@ func run(args []string) error {
 		return cmdList(p)
 	case "current", "who":
 		return cmdCurrent(p)
+	case "login":
+		return cmdLogin(p, args[1:])
 	case "add", "save":
 		return cmdAdd(p, args[1:])
 	case "use", "switch":
