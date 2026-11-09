@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -101,5 +102,7 @@ func loginArgs(prof Profile) []string {
 	if prof.Email == "" {
 		return args
 	}
-	return append(args, "--email", prof.Email)
+	// The sign-in page decodes the value once more than Claude Code encodes it,
+	// which turns a raw + into a space
+	return append(args, "--email", url.QueryEscape(prof.Email))
 }
