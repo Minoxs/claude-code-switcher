@@ -28,11 +28,13 @@ func resolvePaths() (paths, error) {
 		return paths{}, err
 	}
 	dir := filepath.Join(home, ".claude")
+	configJSON := filepath.Join(home, ".claude.json")
 	if v := os.Getenv("CLAUDE_CONFIG_DIR"); v != "" {
 		dir = v
+		configJSON = filepath.Join(v, ".claude.json")
 	}
 	return paths{
-		configJSON:  filepath.Join(home, ".claude.json"),
+		configJSON:  configJSON,
 		claudeDir:   dir,
 		credsJSON:   filepath.Join(dir, ".credentials.json"),
 		profilesDir: filepath.Join(dir, "switcher", "profiles"),
