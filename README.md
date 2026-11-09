@@ -53,6 +53,7 @@ Errors the proxy would otherwise swallow (a token refresh that fails, an upstrea
 ## Commands
 
 ```
+ccx login <name>         sign in again to repair a saved profile's stale token
 ccx add [name]           save the currently logged-in account as a profile
 ccx list                 saved accounts, * on the chosen one
 ccx current              the account logged in on disk right now
@@ -66,6 +67,15 @@ ccx ping [-v]            exit 0 if the proxy is up
 ccx install              start the proxy at logon (Windows Scheduled Task)
 ccx restart              restart the installed proxy on the current binary
 ccx uninstall            remove the logon task
+```
+
+## Login
+
+I got tired of dropping everything to log an account back in, so when a profile's token goes stale, `ccx login` runs Claude Code's own sign-in and puts the new token in that profile. Your running sessions keep their login, and a running proxy picks up the new token by itself. The sign-in page opens with the profile's email filled in. Sign in as a different account and the profile stays as it was. **Needs `claude` installed.** **Saved profiles only**, new accounts still come in through `ccx add`.
+
+```powershell
+ccx login dev
+ccx use dev
 ```
 
 ## Burn
